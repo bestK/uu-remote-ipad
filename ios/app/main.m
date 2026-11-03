@@ -3,7 +3,11 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static NSString *const kStatusPath = @"/private/var/tmp/uu-status.txt";
@@ -15,6 +19,9 @@ static NSString *const kPasscodeDir = @"/var/mobile/Library/UURemote";
 static NSString *const kPasscodePath = @"/var/mobile/Library/UURemote/unlock.key";
 static NSString *const kSettingsPath = @"/var/mobile/Library/UURemote/settings.json";
 static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
+// The host (root) polls this every 2 s and executes the command it finds.
+static NSString *const kCommandPath = @"/var/mobile/Library/UURemote/command";
+static const NSTimeInterval kInstallTimeout = 60;
 
 static const NSTimeInterval kStaleAfter = 10; // the host rewrites uu-status.json every 3 s
 
@@ -112,6 +119,103 @@ static BOOL WritePrivate(NSString *path, NSData *data) {
     return ok;
 }
 
+static NSString *ShellQuote(NSString *s) {
+    return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+}
+
+// Runs the bundled install-service.sh through sudo. The password only lives in this command line;
+// it is never written to a file or logged. Returns the last lines of output (password lines removed).
+static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
+    *success = NO;
+    *timedOut = NO;
+    NSString *script = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"service/install-service.sh"];
+    // The password goes through stdin, never argv: another process could read it from `ps`.
+    NSString *command = [NSString stringWithFormat:@"exec sudo -S sh %@ 2>&1", ShellQuote(script)];
+    NSString *shell = [[NSFileManager defaultManager] isExecutableFileAtPath:@"/var/jb/bin/sh"] ? @"/var/jb/bin/sh" : @"/bin/sh";
+
+    NSMutableDictionary *env = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    env[@"PATH"] = @"/var/jb/usr/local/bin:/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
+    NSMutableArray<NSString *> *envStrings = [NSMutableArray array];
+    for (NSString *k in env) [envStrings addObject:[NSString stringWithFormat:@"%@=%@", k, env[k]]];
+    char **envp = calloc(envStrings.count + 1, sizeof(char *));
+    for (NSUInteger i = 0; i < envStrings.count; i++) envp[i] = strdup(envStrings[i].UTF8String);
+
+    int fds[2], stdinPipe[2];
+    if (pipe(fds) != 0) { free(envp); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
+    if (pipe(stdinPipe) != 0) { close(fds[0]); close(fds[1]); free(envp); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, stdinPipe[0], 0);
+    posix_spawn_file_actions_addclose(&actions, stdinPipe[0]);
+    posix_spawn_file_actions_addclose(&actions, stdinPipe[1]);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 2);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    posix_spawn_file_actions_addclose(&actions, fds[1]);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP); // own group, so a timeout can kill sudo and the script too
+    posix_spawnattr_setpgroup(&attr, 0);
+    char *argv[] = {(char *)shell.UTF8String, "-c", (char *)command.UTF8String, NULL};
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, shell.fileSystemRepresentation, &actions, &attr, argv, envp);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    for (NSUInteger i = 0; i < envStrings.count; i++) free(envp[i]);
+    free(envp);
+    close(fds[1]);
+    close(stdinPipe[0]);
+    if (rc != 0) { close(fds[0]); close(stdinPipe[1]); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
+    {
+        NSString *line = [password stringByAppendingString:@"\n"];
+        const char *bytes = line.UTF8String;
+        size_t length = strlen(bytes), written = 0;
+        while (written < length) {
+            ssize_t n = write(stdinPipe[1], bytes + written, length - written);
+            if (n <= 0) break;
+            written += (size_t)n;
+        }
+    }
+    close(stdinPipe[1]);
+
+    NSMutableData *out = [NSMutableData data];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kInstallTimeout];
+    for (;;) {
+        double left = [deadline timeIntervalSinceNow];
+        if (left <= 0) { *timedOut = YES; break; }
+        struct pollfd pfd = {fds[0], POLLIN, 0};
+        int n = poll(&pfd, 1, (int)MIN(left * 1000, 500));
+        if (n > 0) {
+            char buf[1024];
+            ssize_t r = read(fds[0], buf, sizeof buf);
+            if (r > 0) [out appendBytes:buf length:r];
+            else if (r == 0 || errno != EINTR) break;
+        }
+    }
+    close(fds[0]);
+    int st = 0;
+    if (*timedOut) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, &st, 0);
+    } else {
+        waitpid(pid, &st, 0);
+        *success = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }
+
+    NSString *text = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding] ?: @"";
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *raw in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *line = Trimmed(raw);
+        if (!line.length) continue;
+        if ([line rangeOfString:@"password" options:NSCaseInsensitiveSearch].location != NSNotFound) continue;
+        if ([line rangeOfString:@"[sudo]"].location != NSNotFound) continue;
+        if (password.length && [line rangeOfString:password].location != NSNotFound) continue;
+        [lines addObject:line];
+    }
+    if (lines.count > 5) [lines removeObjectsInRange:NSMakeRange(0, lines.count - 5)];
+    return [lines componentsJoinedByString:@"\n"];
+}
+
 typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostOnline };
 
 @interface PanelController : UIViewController <UITextFieldDelegate>
@@ -124,6 +228,20 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 @property(nonatomic) UIStackView *qrGroup;
 @property(nonatomic) UIImageView *qrView;
 @property(nonatomic) NSDate *qrModified;
+// Account
+@property(nonatomic) UILabel *accountLabel;
+@property(nonatomic) UIButton *logoutButton;
+@property(nonatomic) BOOL loggingOut;
+// Service install
+@property(nonatomic) UIView *installCard;
+@property(nonatomic) UIView *installForm;
+@property(nonatomic) UITextField *installField;
+@property(nonatomic) NSMutableString *installPassword;
+@property(nonatomic) UIButton *installButton;
+@property(nonatomic) UILabel *installResult;
+@property(nonatomic) UILabel *installOutput;
+@property(nonatomic) BOOL installing;
+@property(nonatomic) BOOL installFinished;
 // Auto-unlock
 @property(nonatomic) UIView *unlockCard;
 @property(nonatomic) UITextField *passcodeField;
@@ -168,12 +286,14 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     title.text = T(@"UU 远程", @"UU Remote");
     title.accessibilityTraits = UIAccessibilityTraitHeader;
     UILabel *subtitle = Label(UIFontTextStyleSubheadline, NO, [UIColor secondaryLabelColor]);
-    subtitle.text = T(@"iPad 宿主", @"iPad host");
+    subtitle.text = [NSString stringWithFormat:@"%@ \u00B7 %@", [UIDevice currentDevice].name, T(@"iPad 宿主", @"iPad host")];
     [header addArrangedSubview:title];
     [header addArrangedSubview:subtitle];
     [page addArrangedSubview:header];
 
+    [page addArrangedSubview:(self.installCard = [self installCardView])];
     [page addArrangedSubview:[self statusCard]];
+    [page addArrangedSubview:[self accountCard]];
     [page addArrangedSubview:(self.unlockCard = [self unlockCardView])];
     [page addArrangedSubview:[self lockCard]];
     [page addArrangedSubview:[self shortcutsCard]];
@@ -290,24 +410,8 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
                   @"Unlocks the iPad with the saved passcode when a remote session starts on the lock screen.");
     [stack addArrangedSubview:desc];
 
-    self.passcodeField = [[UITextField alloc] init];
-    self.passcodeField.placeholder = T(@"iPad 锁屏密码", @"iPad passcode");
-    self.passcodeField.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    self.passcodeField.adjustsFontForContentSizeCategory = YES;
-    // Masked by hand: with secureTextEntry iOS hides the keyboard from screen capture, so a remote
-    // viewer would see a grey box instead of the keys.
     self.passcode = [NSMutableString string];
-    self.passcodeField.delegate = self;
-    self.passcodeField.keyboardType = UIKeyboardTypeASCIICapable;
-    self.passcodeField.autocorrectionType = UITextAutocorrectionTypeNo;
-    self.passcodeField.spellCheckingType = UITextSpellCheckingTypeNo; // keep it out of keyboard learning
-    self.passcodeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    self.passcodeField.smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
-    self.passcodeField.textContentType = UITextContentTypeOneTimeCode; // keep it out of AutoFill/Keychain prompts
-    self.passcodeField.returnKeyType = UIReturnKeyDone;
-    self.passcodeField.borderStyle = UITextBorderStyleRoundedRect;
-    [self.passcodeField setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
-    [self.passcodeField.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    self.passcodeField = [self maskedFieldWithPlaceholder:T(@"iPad 锁屏密码", @"iPad passcode")];
 
     self.saveButton = [self buttonWithTitle:T(@"保存", @"Save") bold:YES action:@selector(savePasscode)];
     self.clearButton = [self buttonWithTitle:T(@"清除", @"Clear") bold:NO action:@selector(clearPasscode)];
@@ -323,6 +427,70 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     self.unlockLabel = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
     [stack addArrangedSubview:self.unlockLabel];
     [self updateButtons];
+    return card;
+}
+
+// Masked by hand: with secureTextEntry iOS hides the keyboard from screen capture, so a remote
+// viewer would see a grey box instead of the keys. The caller owns the backing string.
+- (UITextField *)maskedFieldWithPlaceholder:(NSString *)placeholder {
+    UITextField *f = [[UITextField alloc] init];
+    f.placeholder = placeholder;
+    f.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    f.adjustsFontForContentSizeCategory = YES;
+    f.delegate = self;
+    f.keyboardType = UIKeyboardTypeASCIICapable;
+    f.autocorrectionType = UITextAutocorrectionTypeNo;
+    f.spellCheckingType = UITextSpellCheckingTypeNo; // keep it out of keyboard learning
+    f.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    f.smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
+    f.textContentType = UITextContentTypeOneTimeCode; // keep it out of AutoFill/Keychain prompts
+    f.returnKeyType = UIReturnKeyDone;
+    f.borderStyle = UITextBorderStyleRoundedRect;
+    [f setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [f.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    return f;
+}
+
+- (UIView *)accountCard {
+    UIStackView *stack;
+    UIView *card = [self cardWithStack:&stack];
+    [stack addArrangedSubview:[self cardTitle:T(@"账号", @"Account")]];
+    self.accountLabel = Label(UIFontTextStyleBody, NO, [UIColor labelColor]);
+    self.logoutButton = [self buttonWithTitle:T(@"退出登录", @"Sign out") bold:NO action:@selector(confirmLogout)];
+    [self.logoutButton setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    [self.logoutButton setTitleColor:[UIColor tertiaryLabelColor] forState:UIControlStateDisabled];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.accountLabel, self.logoutButton]];
+    row.spacing = 12;
+    row.alignment = UIStackViewAlignmentCenter;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [stack addArrangedSubview:row];
+    return card;
+}
+
+- (UIView *)installCardView {
+    UIStackView *stack;
+    UIView *card = [self cardWithStack:&stack];
+    [stack addArrangedSubview:[self cardTitle:T(@"安装服务", @"Install service")]];
+    UILabel *desc = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    desc.text = T(@"把宿主服务安装到系统后才能被远程控制。", @"Install the host service to the system to allow remote control.");
+    [stack addArrangedSubview:desc];
+
+    self.installPassword = [NSMutableString string];
+    self.installField = [self maskedFieldWithPlaceholder:T(@"设备密码，默认 123", @"Device password, default 123")];
+    self.installButton = [self buttonWithTitle:T(@"安装", @"Install") bold:YES action:@selector(installService)];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.installField, self.installButton]];
+    row.spacing = 12;
+    row.alignment = UIStackViewAlignmentCenter;
+    self.installForm = row;
+    [stack addArrangedSubview:row];
+    [stack setCustomSpacing:12 afterView:desc];
+
+    self.installResult = Label(UIFontTextStyleSubheadline, YES, [UIColor labelColor]);
+    self.installResult.hidden = YES;
+    [stack addArrangedSubview:self.installResult];
+    self.installOutput = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    self.installOutput.hidden = YES;
+    [stack addArrangedSubview:self.installOutput];
     return card;
 }
 
@@ -443,15 +611,17 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 #pragma mark - Passcode
 
 - (BOOL)textField:(UITextField *)field shouldChangeCharactersInRange:(NSRange)range replacementString:(NSString *)text {
-    if (NSMaxRange(range) > self.passcode.length) range = NSMakeRange(self.passcode.length, 0);
-    [self.passcode replaceCharactersInRange:range withString:text];
-    field.text = [@"" stringByPaddingToLength:self.passcode.length withString:@"\u2022" startingAtIndex:0];
+    NSMutableString *value = field == self.installField ? self.installPassword : self.passcode;
+    if (NSMaxRange(range) > value.length) range = NSMakeRange(value.length, 0);
+    [value replaceCharactersInRange:range withString:text];
+    field.text = [@"" stringByPaddingToLength:value.length withString:@"\u2022" startingAtIndex:0];
     [self updateButtons];
     return NO;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)field {
-    if (self.passcode.length) [self savePasscode];
+    if (field == self.installField) [self installService];
+    else if (self.passcode.length) [self savePasscode];
     else [field resignFirstResponder];
     return NO;
 }
@@ -492,6 +662,54 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     [self refresh];
 }
 
+#pragma mark - Account
+
+- (void)confirmLogout {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:T(@"退出登录？", @"Sign out?")
+        message:T(@"退出后需要重新扫码登录。", @"You will need to scan the QR code to sign in again.")
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:T(@"取消", @"Cancel") style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:T(@"退出登录", @"Sign out") style:UIAlertActionStyleDestructive
+        handler:^(UIAlertAction *a) { [self logout]; }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)logout {
+    if (!WritePrivate(kCommandPath, [@"logout\n" dataUsingEncoding:NSUTF8StringEncoding])) return;
+    self.loggingOut = YES;
+    [self refresh];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        self.loggingOut = NO;
+        [self refresh];
+    });
+}
+
+#pragma mark - Service install
+
+- (void)installService {
+    if (self.installing) return;
+    NSString *password = self.installPassword.length ? [self.installPassword copy] : @"123";
+    [self.installPassword setString:@""];
+    self.installField.text = @"";
+    [self.installField resignFirstResponder];
+    self.installing = YES;
+    self.installFinished = NO;
+    [self refresh];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL ok, timedOut;
+        NSString *output = RunInstall(password, &ok, &timedOut);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.installing = NO;
+            self.installFinished = YES;
+            self.installResult.text = ok ? T(@"安装完成", @"Installed")
+                : timedOut ? T(@"安装超时", @"Install timed out") : T(@"安装失败", @"Install failed");
+            self.installResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+            self.installOutput.text = output;
+            [self refresh];
+        });
+    });
+}
+
 #pragma mark - Settings
 
 - (void)lockSwitchChanged {
@@ -522,8 +740,9 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         indicator.bottom = bottom;
         self.scrollView.verticalScrollIndicatorInsets = indicator;
     } completion:^(BOOL finished) {
-        if (bottom > 0 && self.passcodeField.isFirstResponder) {
-            CGRect r = [self.unlockCard convertRect:self.unlockCard.bounds toView:self.scrollView];
+        UIView *owner = self.passcodeField.isFirstResponder ? self.unlockCard : self.installField.isFirstResponder ? self.installCard : nil;
+        if (bottom > 0 && owner) {
+            CGRect r = [owner convertRect:owner.bounds toView:self.scrollView];
             r.origin.y -= 12;
             r.size.height += 24;
             [self.scrollView scrollRectToVisible:r animated:YES];
@@ -563,12 +782,45 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         : T(@"还没有远程连接", @"No remote connections yet"));
 
     [self refreshQR:state == HostWaiting];
+    [self refreshAccount:[status[@"signed_in"] boolValue]];
+    // roothide hides /var/jb from an app, so the daemon binary cannot be probed by path: a fresh
+    // status file means the service is installed and running.
+    [self refreshInstall:state != HostDown];
     [self refreshUnlock];
 
     BOOL lockAfter = [ReadJSONDict(kSettingsPath)[@"lock_after_session"] boolValue];
     if (!self.lockSwitch.tracking && self.lockSwitch.on != lockAfter) [self.lockSwitch setOn:lockAfter animated:NO];
 
     [self refreshHistory:history];
+}
+
+- (void)refreshAccount:(BOOL)signedIn {
+    SetText(self.accountLabel, signedIn ? T(@"已登录", @"Signed in") : T(@"未登录", @"Signed out"));
+    NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…") : T(@"退出登录", @"Sign out");
+    if (![[self.logoutButton titleForState:UIControlStateNormal] isEqualToString:title]) {
+        [UIView performWithoutAnimation:^{
+            [self.logoutButton setTitle:title forState:UIControlStateNormal];
+            [self.logoutButton layoutIfNeeded];
+        }];
+    }
+    BOOL enabled = signedIn && !self.loggingOut;
+    if (self.logoutButton.enabled != enabled) self.logoutButton.enabled = enabled;
+}
+
+- (void)refreshInstall:(BOOL)installed {
+    SetHidden(self.installCard, installed && !self.installFinished && !self.installing);
+    SetHidden(self.installForm, installed);
+    NSString *title = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装", @"Install");
+    if (![[self.installButton titleForState:UIControlStateNormal] isEqualToString:title]) {
+        [UIView performWithoutAnimation:^{
+            [self.installButton setTitle:title forState:UIControlStateNormal];
+            [self.installButton layoutIfNeeded];
+        }];
+    }
+    if (self.installButton.enabled != !self.installing) self.installButton.enabled = !self.installing;
+    if (self.installField.enabled != !self.installing) self.installField.enabled = !self.installing;
+    SetHidden(self.installResult, !self.installFinished);
+    SetHidden(self.installOutput, !self.installFinished || self.installOutput.text.length == 0);
 }
 
 - (void)refreshQR:(BOOL)waiting {

@@ -422,6 +422,37 @@ async fn run_ios_login() -> Credentials {
     }
 }
 
+/// Panel commands (iOS): the app writes "logout" to a file in its own directory; the host signs
+/// out of the account, drops the local credentials and restarts into the QR flow.
+#[cfg(target_os = "ios")]
+fn watch_panel_commands() {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let path = "/var/mobile/Library/UURemote/command";
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            if text.trim() != "logout" { continue; }
+            let _ = std::fs::remove_file(path);
+            log::info!("Panel requested sign-out");
+            if let Ok((_, creds)) = crate::login::prepare_device().await {
+                match UUAuthClient::new(creds).post_json("/api/v1/user/logout", &serde_json::json!({})).await {
+                    Ok((status, _)) => log::info!("Cloud sign-out answered: http_status={status}"),
+                    Err(error) => log::warn!("Cloud sign-out failed: {error}"),
+                }
+            }
+            if let Ok(Some(cfg)) = crate::config::file() {
+                let mut cfg = cfg.clone();
+                if let Some(fields) = cfg.as_object_mut() {
+                    for key in ["token", "csrf", "user_id"] { fields.remove(key); }
+                }
+                let _ = crate::login::write_config(&cfg);
+            }
+            log::info!("Signed out; restarting to show a new QR code");
+            std::process::exit(0);
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Not signed in, with a desktop: one window offers remote assistance (guest identity) and the QR
@@ -441,6 +472,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         ios_platform::lift_memory_limit();
         ios_platform::start_status_writer();
+        watch_panel_commands();
     }
     // An unknown argument must never fall through to starting a second full host server.
     let arg1 = std::env::args().nth(1);

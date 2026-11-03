@@ -726,8 +726,8 @@ impl WebRtcSession {
                                     continue;
                                 }
                                 let ts=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                if let Ok(message)=crate::capture_setting::screen_sources(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,input_size,None,"Linux desktop") {let _=response_tx.send(message);}
-                                if let Ok(message)=crate::initialization::encode_capture_change(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,0,crate::wayland::selected() as i32,"Linux desktop") {let _=response_tx.send(message);}
+                                if let Ok(message)=crate::capture_setting::screen_sources(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,input_size,None,&crate::login::desktop_name()) {let _=response_tx.send(message);}
+                                if let Ok(message)=crate::initialization::encode_capture_change(sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed),ts,0,crate::wayland::selected() as i32,&crate::login::desktop_name()) {let _=response_tx.send(message);}
                             }
                             let Ok(fields) = crate::protocol::decode_wire(&request) else { continue; };
                             use crate::protocol::WireValue;
@@ -776,7 +776,7 @@ impl WebRtcSession {
                             let _ = response_tx.send(crate::initialization::envelope(next(), timestamp, 22, &response));
                             let current = *settings.borrow();
                             if current.output != output_before || resized.is_some() {
-                                match crate::capture_setting::screen_sources(next(), timestamp, input_size, current.output, "Linux desktop") {
+                                match crate::capture_setting::screen_sources(next(), timestamp, input_size, current.output, &crate::login::desktop_name()) {
                                     Ok(screens) => { let _ = response_tx.send(screens); }
                                     Err(error) => log::warn!("Screen sources update failed: {}", error),
                                 }
@@ -920,7 +920,7 @@ impl WebRtcSession {
                                     .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                                 let message = crate::initialization::encode_capture_change(
                                     sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                    timestamp, 0, crate::wayland::selected() as i32, "Linux desktop").expect("desktop capture type");
+                                    timestamp, 0, crate::wayland::selected() as i32, &crate::login::desktop_name()).expect("desktop capture type");
                                 if let Err(error) = channel.send(&bytes::Bytes::from(message)).await {
                                     log::error!("CONTROL desktop selection failed: {error}");
                                     return;
@@ -1016,13 +1016,13 @@ impl WebRtcSession {
                                 // for ScreenSources/CaptureChange and aborts otherwise: tool peers get a nominal screen.
                                 let screen_size=crate::wayland::input_size(if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) });
                                 let messages = [
-                                    (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, crate::wayland::selected() as i32, "Linux desktop")),
+                                    (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, crate::wayland::selected() as i32, &crate::login::desktop_name())),
                                     (13, Ok(crate::initialization::envelope(next_seq(), timestamp, 13, &init_actions.metrics_payload(desktop_sound, desktop_permission)))),
                                     (26, Ok(crate::initialization::envelope(next_seq(), timestamp, 26,
                                         &crate::system_metrics::remote_download_path(&home)))),
                                     (18, Ok(crate::initialization::envelope(next_seq(), timestamp, 18,
                                         &crate::capture_setting::codec_negotiation(screen_size, crate::video::display_fps(), init_track.supports(crate::capture_setting::VideoCodec::H265))))),
-                                    (7, crate::capture_setting::screen_sources(next_seq(), timestamp, screen_size, init_video.borrow().output, "Linux desktop")),
+                                    (7, crate::capture_setting::screen_sources(next_seq(), timestamp, screen_size, init_video.borrow().output, &crate::login::desktop_name())),
                                 ];
                                 if desktop && screen.init_error.is_none() {
                                     let codec = crate::capture_setting::preferred_codec_for(init_track.supports(crate::capture_setting::VideoCodec::H264),

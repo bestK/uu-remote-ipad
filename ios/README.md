@@ -8,7 +8,8 @@
 - **抓屏**：frida 注入 SpringBoard（`agent/screen.js`），`UIWindow.createScreenIOSurface` 编成 JPEG 写文件，宿主读取。
 - **编码**：`c_engine/ios_video.m` 在进程内用 VideoToolbox 编 H.264 / H.265（Annex-B + AUD），半分辨率，约 25–30 fps。
 - **输入**：frida 注入 backboardd（`agent/hid.js`）。触摸走 `AOPTouchHIDDriver` sender，键盘必须走 accessibility sender。
-- **锁屏**：锁屏界面照常抓屏；画面停住时唤醒；面板 App 里保存的密码用于自动解锁。
+- **锁屏**：锁屏界面照常抓屏；画面停住时唤醒；面板 App 里保存的密码用于自动解锁；
+  面板里的开关可以让最后一个远程连接结束后自动锁屏。
 - **键位**（PC 客户端）：Ctrl→Cmd、Win→Ctrl、Alt→Option；Mac 客户端原样透传（Mac 的 Cmd 本来就是 Win 键）。
 
 ## 远程操作
@@ -43,9 +44,20 @@
 |---|---|
 | `agent/` | 注入 SpringBoard / backboardd 的 frida 脚本（`objc.js` 是 frida 17 去掉的 ObjC bridge） |
 | `app/` | 主屏「UU 远程」面板：登录二维码、自动解锁密码（`make-icon.py` 从本机官方 Mac 客户端生成图标，仓库里不放网易素材） |
-| `install/` | LaunchDaemon（宿主 + frida-server）、宿主 entitlements、安装脚本 |
+| `install/` | LaunchDaemon（宿主 + frida-server）、宿主 entitlements、安装脚本（`install-service.sh` 由面板首次运行调用） |
 | `frida/fetch-devkit.sh` | 下载 frida-core devkit 17.25.0（约 200 MB，不进仓库） |
 | `probe/`、`tweak/` | 早期探针，诊断用 |
+
+## 安装（普通用户，一个 IPA）
+
+1. 设备需要越狱（Dopamine / roothide），frida-server 必须以 root 运行。
+2. 用 TrollStore 或 SideStore 安装 `UURemotePanel.ipa`（构建产物在 `ios/app/build/`）。
+   IPA 里已经带了宿主服务：`uuremote-server`、`frida-server`、两个 LaunchDaemon 配置和安装脚本。
+3. 首次打开「UU 远程」面板，会看到「安装服务」卡片：输入设备密码（Dopamine 默认 `123`），点「安装」。
+   面板通过 sudo 调用随包的 `install-service.sh`，把服务装进系统并启动。
+4. 装好后卡片消失，状态变成「等待扫码登录」，用手机上的「网易UU远程」扫码即可。
+
+面板里的「账号」卡片可以退出登录，退出后需要重新扫码。
 
 ## 构建（Mac）
 

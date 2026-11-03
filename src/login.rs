@@ -109,6 +109,11 @@ fn hostname() -> String {
     "Linux".into()
 }
 
+/// Name the viewer shows for this host's screen: the iPad's own name on iOS.
+pub(crate) fn desktop_name() -> String {
+    if cfg!(target_os = "ios") { hostname() } else { "Linux desktop".into() }
+}
+
 /// csrf claim inside the JWT access token.
 fn csrf_from_token(token: &str) -> Option<String> {
     use base64::Engine;
