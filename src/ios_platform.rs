@@ -381,6 +381,43 @@ pub fn kbinfo() -> Result<String, String> { with_hid(|s| s.call("kbinfo", "[]"))
 pub fn senders() -> Result<String, String> { with_hid(|s| s.call("senders", "[]")) }
 
 pub fn key(usage: u32, down: bool) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    if !down {
+        if let Ok(mut held) = HELD_KEYS.lock() { held.get_or_insert_with(Default::default).remove(&usage); }
+        return send_key(usage, false);
+    }
+    // iPadOS does not repeat a synthesized key by itself, and a repeated key-down alone is ignored
+    // (measured: 13 downs typed two characters). Hold is simulated with down/up pairs instead.
+    let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let already = match HELD_KEYS.lock() {
+        Ok(mut held) => held.get_or_insert_with(Default::default).insert(usage, token).is_some(),
+        Err(_) => true,
+    };
+    send_key(usage, true)?;
+    if !already && repeats(usage) { spawn_repeat(usage, token); }
+    Ok(())
+}
+
+/// Modifiers and locks stay single-shot; everything else repeats while held.
+fn repeats(usage: u32) -> bool { !matches!(usage, 0x39 | 0xe0..=0xe7) }
+
+/// Keys the controller is holding: usage -> the token of the repeat thread that serves it.
+static HELD_KEYS: Mutex<Option<std::collections::BTreeMap<u32, u64>>> = Mutex::new(None);
+
+fn spawn_repeat(usage: u32, token: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(450));
+        loop {
+            let active = HELD_KEYS.lock().ok().and_then(|h| h.as_ref().and_then(|h| h.get(&usage).copied())) == Some(token);
+            if !active { return; }
+            let _ = send_key(usage, true);
+            let _ = send_key(usage, false);
+            std::thread::sleep(Duration::from_millis(60));
+        }
+    });
+}
+
+fn send_key(usage: u32, down: bool) -> Result<(), String> {
     // UU_KSENDER pins the HID sender id while bringing up keyboard injection.
     note_input();
     let sender = std::env::var("UU_KSENDER").unwrap_or_else(|_| "0".into());
