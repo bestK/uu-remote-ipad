@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
@@ -33,22 +34,123 @@ static NSString *T(NSString *zh, NSString *en) {
 }
 
 // Bold variant that still follows Dynamic Type.
-static UIFont *Font(UIFontTextStyle style, BOOL bold) {
-    if (!bold) return [UIFont preferredFontForTextStyle:style];
+static UIFont *FontForTraitsWeight(UIFontTextStyle style, UIFontWeight weight, UITraitCollection *traits) {
     UITraitCollection *base = [UITraitCollection traitCollectionWithPreferredContentSizeCategory:UIContentSizeCategoryLarge];
     UIFontDescriptor *d = [UIFontDescriptor preferredFontDescriptorWithTextStyle:style compatibleWithTraitCollection:base];
-    d = [d fontDescriptorWithSymbolicTraits:UIFontDescriptorTraitBold] ?: d;
-    return [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:[UIFont fontWithDescriptor:d size:0]];
+    UIFont *font = [UIFont systemFontOfSize:d.pointSize weight:weight];
+    return [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:font compatibleWithTraitCollection:traits];
 }
 
-static UILabel *Label(UIFontTextStyle style, BOOL bold, UIColor *color) {
-    UILabel *l = [[UILabel alloc] init];
-    l.font = Font(style, bold);
+static UIFont *FontForTraits(UIFontTextStyle style, BOOL bold, UITraitCollection *traits) {
+    return FontForTraitsWeight(style, bold ? UIFontWeightBold : UIFontWeightRegular, traits);
+}
+
+static UIFont *Font(UIFontTextStyle style, BOOL bold) { return FontForTraits(style, bold, nil); }
+
+// 显式跟随所属窗口的字号，兼顾分屏、环境覆盖和辅助功能超大字号。
+@interface PanelLabel : UILabel
+@property(nonatomic) UIFontTextStyle panelStyle;
+@property(nonatomic) UIFontWeight panelWeight;
+@property(nonatomic) BOOL panelMonospaced;
+@end
+@implementation PanelLabel
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (self.panelStyle) {
+        if (self.panelMonospaced) {
+            UITraitCollection *base = [UITraitCollection traitCollectionWithPreferredContentSizeCategory:UIContentSizeCategoryLarge];
+            UIFontDescriptor *d = [UIFontDescriptor preferredFontDescriptorWithTextStyle:self.panelStyle compatibleWithTraitCollection:base];
+            UIFont *mono = [UIFont monospacedSystemFontOfSize:d.pointSize weight:self.panelWeight];
+            self.font = [[UIFontMetrics metricsForTextStyle:self.panelStyle] scaledFontForFont:mono compatibleWithTraitCollection:self.traitCollection];
+        } else {
+            self.font = FontForTraitsWeight(self.panelStyle, self.panelWeight, self.traitCollection);
+        }
+    }
+}
+@end
+
+static UILabel *LabelWeight(UIFontTextStyle style, UIFontWeight weight, UIColor *color) {
+    PanelLabel *l = [[PanelLabel alloc] init];
+    l.panelStyle = style;
+    l.panelWeight = weight;
+    l.font = FontForTraitsWeight(style, weight, nil);
     l.adjustsFontForContentSizeCategory = YES;
     l.textColor = color;
     l.numberOfLines = 0;
     return l;
 }
+
+static UILabel *Label(UIFontTextStyle style, BOOL bold, UIColor *color) {
+    return LabelWeight(style, bold ? UIFontWeightBold : UIFontWeightRegular, color);
+}
+
+static UILabel *MonoLabel(UIFontTextStyle style, UIColor *color) {
+    PanelLabel *l = [[PanelLabel alloc] init];
+    l.panelStyle = style;
+    l.panelWeight = UIFontWeightMedium;
+    l.panelMonospaced = YES;
+    UITraitCollection *base = [UITraitCollection traitCollectionWithPreferredContentSizeCategory:UIContentSizeCategoryLarge];
+    UIFontDescriptor *d = [UIFontDescriptor preferredFontDescriptorWithTextStyle:style compatibleWithTraitCollection:base];
+    UIFont *mono = [UIFont monospacedSystemFontOfSize:d.pointSize weight:UIFontWeightMedium];
+    l.font = [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:mono];
+    l.adjustsFontForContentSizeCategory = YES;
+    l.textColor = color;
+    l.numberOfLines = 1;
+    l.lineBreakMode = NSLineBreakByTruncatingTail;
+    return l;
+}
+
+// Capsule text field with comfortable horizontal padding and no legacy border.
+@interface PaddedTextField : UITextField
+@end
+@implementation PaddedTextField
+- (CGRect)textRectForBounds:(CGRect)bounds {
+    return CGRectMake(bounds.origin.x + 18, bounds.origin.y, MAX(0, bounds.size.width - 36), bounds.size.height);
+}
+- (CGRect)editingRectForBounds:(CGRect)bounds { return [self textRectForBounds:bounds]; }
+- (CGRect)placeholderRectForBounds:(CGRect)bounds { return [self textRectForBounds:bounds]; }
+@end
+
+// Geometric 8-spoke asterisk ornament for the status hero card (prominent in dark mode, whisper-subtle in light).
+@interface HeroAsteriskView : UIView
+@property(nonatomic) CAShapeLayer *spokeLayer;
+@end
+@implementation HeroAsteriskView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.spokeLayer = [CAShapeLayer layer];
+        self.spokeLayer.fillColor = nil;
+        self.spokeLayer.lineWidth = 11;
+        [self.layer addSublayer:self.spokeLayer];
+        [self updateAppearance];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.spokeLayer.frame = self.bounds;
+    CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
+    CGFloat cx = w * 0.5, cy = h * 0.5, r = MIN(w, h) * 0.46;
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    for (int i = 0; i < 4; i++) {
+        double angle = (double)i * (M_PI / 4.0);
+        CGFloat dx = (CGFloat)cos(angle) * r, dy = (CGFloat)sin(angle) * r;
+        [path moveToPoint:CGPointMake(cx - dx, cy - dy)];
+        [path addLineToPoint:CGPointMake(cx + dx, cy + dy)];
+    }
+    self.spokeLayer.path = path.CGPath;
+}
+- (void)updateAppearance {
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    self.hidden = !dark;
+    self.spokeLayer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self updateAppearance];
+}
+@end
 
 // Avoids flicker from the 1 s refresh.
 static void SetText(UILabel *l, NSString *s) { if (![l.text isEqualToString:s]) l.text = s; }
@@ -218,22 +320,168 @@ static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
 
 typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostOnline };
 
-@interface PanelController : UIViewController <UITextFieldDelegate>
+#pragma mark - Theme Palette
+
+// Light: warm stone #ECECE7; Dark: deep carbon #0A0A0D.
+static UIColor *PageSurfaceColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithRed:0.039 green:0.039 blue:0.051 alpha:1]
+            : [UIColor colorWithRed:0.925 green:0.925 blue:0.906 alpha:1];
+    }];
+}
+
+// Light: crisp white #FFFFFF; Dark: dark graphite #18181C.
+static UIColor *CardSurfaceColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithRed:0.094 green:0.094 blue:0.110 alpha:1]
+            : [UIColor colorWithWhite:1.0 alpha:1];
+    }];
+}
+
+// Status Hero surface: white card in Light mode; vibrant electric blue #1D74F5 (or state surface) in Dark mode.
+static UIColor *HeroSurfaceColor(HostState state) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle != UIUserInterfaceStyleDark) return [UIColor whiteColor];
+        switch (state) {
+            case HostActive:
+            case HostOnline: return [UIColor colorWithRed:0.114 green:0.455 blue:0.961 alpha:1];
+            case HostWaiting: return [UIColor colorWithRed:0.114 green:0.380 blue:0.820 alpha:1];
+            case HostDown: return [UIColor colorWithRed:0.125 green:0.129 blue:0.153 alpha:1];
+        }
+    }];
+}
+
+static UIColor *HeroPrimaryTextColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor whiteColor]
+            : [UIColor colorWithRed:0.047 green:0.047 blue:0.055 alpha:1];
+    }];
+}
+
+static UIColor *HeroSecondaryTextColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.78]
+            : [UIColor colorWithRed:0.467 green:0.482 blue:0.514 alpha:1];
+    }];
+}
+
+// Electric lime #D6FF00 in Light mode (active/online), amber for waiting, stone for offline;
+// translucent white badge on the electric-blue hero card in Dark mode.
+static UIColor *StatusBadgeFillColor(HostState state) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.18];
+        }
+        switch (state) {
+            case HostActive:
+            case HostOnline:
+                return [UIColor colorWithRed:0.839 green:1.000 blue:0.000 alpha:1];
+            case HostWaiting:
+                return [UIColor colorWithRed:1.000 green:0.882 blue:0.302 alpha:1];
+            case HostDown:
+                return [UIColor colorWithRed:0.898 green:0.902 blue:0.882 alpha:1];
+        }
+    }];
+}
+
+static UIColor *StatusBadgeTextColor(HostState state) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor whiteColor];
+        }
+        if (state == HostDown) {
+            return [UIColor colorWithRed:0.320 green:0.333 blue:0.365 alpha:1];
+        }
+        return [UIColor colorWithRed:0.047 green:0.047 blue:0.055 alpha:1];
+    }];
+}
+
+static UIColor *FieldFillColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithRed:0.141 green:0.141 blue:0.165 alpha:1]
+            : [UIColor colorWithRed:0.953 green:0.953 blue:0.941 alpha:1];
+    }];
+}
+
+static UIColor *PrimaryActionFillColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithRed:0.114 green:0.455 blue:0.961 alpha:1]
+            : [UIColor colorWithRed:0.047 green:0.047 blue:0.055 alpha:1];
+    }];
+}
+
+static UIColor *SecondaryPillFillColor(BOOL destructive) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return destructive
+                ? [UIColor colorWithRed:0.224 green:0.114 blue:0.122 alpha:1]
+                : [UIColor colorWithRed:0.149 green:0.149 blue:0.176 alpha:1];
+        }
+        return [UIColor colorWithRed:0.953 green:0.953 blue:0.941 alpha:1];
+    }];
+}
+
+static UIColor *SecondaryPillTextColor(BOOL destructive, BOOL enabled) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        BOOL dark = traits.userInterfaceStyle == UIUserInterfaceStyleDark;
+        if (!enabled) {
+            return dark ? [UIColor colorWithWhite:1.0 alpha:0.28] : [UIColor colorWithWhite:0.0 alpha:0.28];
+        }
+        if (dark && destructive) {
+            return [UIColor colorWithRed:1.000 green:0.353 blue:0.310 alpha:1];
+        }
+        return dark ? [UIColor whiteColor] : [UIColor colorWithRed:0.047 green:0.047 blue:0.055 alpha:1];
+    }];
+}
+
+static UIColor *SubtleDividerColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.08]
+            : [UIColor colorWithWhite:0.0 alpha:0.06];
+    }];
+}
+
+@interface PanelController : UITabBarController <UITextFieldDelegate, UITabBarControllerDelegate>
 @property(nonatomic) NSTimer *timer;
-@property(nonatomic) UIScrollView *scrollView;
-// Status
-@property(nonatomic) UIView *dot;
+@property(nonatomic) NSMutableArray<UIScrollView *> *scrollViews;
+// Floating pill bar
+@property(nonatomic) UIView *floatingBar;
+@property(nonatomic) NSArray<UIButton *> *floatingTabButtons;
+// Status hero card
+@property(nonatomic) UIView *statusPlate;
+@property(nonatomic) HeroAsteriskView *heroWatermark;
+@property(nonatomic) UILabel *heroDeviceLabel;
+@property(nonatomic) UIView *statusBadgePill;
+@property(nonatomic) UILabel *statusBadgeLabel;
+@property(nonatomic) UIView *statusSymbolCircle;
+@property(nonatomic) UIImageView *statusSymbol;
+@property(nonatomic) UILabel *stateDetail;
+@property(nonatomic) HostState displayedState;
+@property(nonatomic) BOOL hasDisplayedState;
 @property(nonatomic) UILabel *statusLabel;
+@property(nonatomic) UILabel *lastSessionTitleLabel;
 @property(nonatomic) UILabel *lastSessionLabel;
 @property(nonatomic) UIStackView *qrGroup;
 @property(nonatomic) UIImageView *qrView;
 @property(nonatomic) NSDate *qrModified;
 // Account
+@property(nonatomic) UIView *accountCard;
+@property(nonatomic) UIView *accountAvatar;
+@property(nonatomic) UIImageView *accountSymbol;
+@property(nonatomic) UILabel *accountCaptionLabel;
 @property(nonatomic) UILabel *accountLabel;
 @property(nonatomic) UIButton *logoutButton;
 @property(nonatomic) BOOL loggingOut;
 // Service install
 @property(nonatomic) UIView *installCard;
+@property(nonatomic) UIView *installSection;
 @property(nonatomic) UIView *installForm;
 @property(nonatomic) UITextField *installField;
 @property(nonatomic) NSMutableString *installPassword;
@@ -244,6 +492,8 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 @property(nonatomic) BOOL installFinished;
 // Auto-unlock
 @property(nonatomic) UIView *unlockCard;
+@property(nonatomic) UIView *unlockStatusPill;
+@property(nonatomic) UIImageView *unlockSymbol;
 @property(nonatomic) UITextField *passcodeField;
 @property(nonatomic) NSMutableString *passcode;
 @property(nonatomic) UIButton *saveButton;
@@ -256,129 +506,322 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 // History
 @property(nonatomic) UIStackView *historyRows;
 @property(nonatomic) NSArray *historyShown;
+// Shortcuts
+@property(nonatomic) UISegmentedControl *shortcutPlatform;
+@property(nonatomic) UIStackView *shortcutRows;
+@property(nonatomic) NSArray<NSDictionary *> *shortcutValues;
+@property(nonatomic) NSArray<NSString *> *shortcutKeyTexts;
 @end
 
 @implementation PanelController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view.backgroundColor = PageSurfaceColor();
+    self.view.tintColor = PrimaryActionFillColor();
+    self.delegate = self;
+    self.scrollViews = [NSMutableArray array];
 
-    self.scrollView = [[UIScrollView alloc] init];
-    self.scrollView.alwaysBounceVertical = YES;
-    self.scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
-    self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.scrollView];
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self.view action:@selector(endEditing:)];
-    tap.cancelsTouchesInView = NO;
-    [self.scrollView addGestureRecognizer:tap];
+    UIView *status = [self statusPlateView];
+    self.installCard = [self installCardView];
+    self.installSection = [self insetSection:self.installCard];
+    self.unlockCard = [self unlockCardView];
+    self.accountCard = [self accountCardView];
+    self.viewControllers = @[
+        [self pageWithTitle:T(@"连接", @"Connect") tab:T(@"连接", @"Connect") symbol:@"ipad"
+            sections:@[[self insetSection:status], self.installSection, [self insetSection:self.accountCard],
+                [self insetSection:[self historyCard]]]],
+        [self pageWithTitle:T(@"安全", @"Security") tab:T(@"安全", @"Security") symbol:@"lock.shield"
+            sections:@[[self insetSection:self.unlockCard], [self insetSection:[self lockCard]]]],
+        [self pageWithTitle:T(@"快捷键", @"Shortcuts") tab:T(@"快捷键", @"Shortcuts") symbol:@"keyboard"
+            sections:@[[self insetSection:[self shortcutsCard]]]],
+    ];
+    self.tabBar.hidden = YES;
+    [self setupFloatingTabBar];
 
-    UIStackView *page = [[UIStackView alloc] init];
-    page.axis = UILayoutConstraintAxisVertical;
-    page.spacing = 20;
-    page.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.scrollView addSubview:page];
-
-    UIStackView *header = [[UIStackView alloc] init];
-    header.axis = UILayoutConstraintAxisVertical;
-    header.spacing = 2;
-    UILabel *title = Label(UIFontTextStyleLargeTitle, YES, [UIColor labelColor]);
-    title.text = T(@"UU 远程", @"UU Remote");
-    title.accessibilityTraits = UIAccessibilityTraitHeader;
-    UILabel *subtitle = Label(UIFontTextStyleSubheadline, NO, [UIColor secondaryLabelColor]);
-    subtitle.text = [NSString stringWithFormat:@"%@ \u00B7 %@", [UIDevice currentDevice].name, T(@"iPad 宿主", @"iPad host")];
-    [header addArrangedSubview:title];
-    [header addArrangedSubview:subtitle];
-    [page addArrangedSubview:header];
-
-    [page addArrangedSubview:(self.installCard = [self installCardView])];
-    [page addArrangedSubview:[self statusCard]];
-    [page addArrangedSubview:[self accountCard]];
-    [page addArrangedSubview:(self.unlockCard = [self unlockCardView])];
-    [page addArrangedSubview:[self lockCard]];
-    [page addArrangedSubview:[self shortcutsCard]];
-    [page addArrangedSubview:[self historyCard]];
-
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    UILayoutGuide *content = self.scrollView.contentLayoutGuide;
-    NSLayoutConstraint *preferredWidth = [page.widthAnchor constraintEqualToConstant:680];
-    preferredWidth.priority = UILayoutPriorityDefaultHigh;
-    [NSLayoutConstraint activateConstraints:@[
-        [self.scrollView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-
-        [page.topAnchor constraintEqualToAnchor:content.topAnchor constant:24],
-        [page.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-32],
-        [page.centerXAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.centerXAnchor],
-        [page.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:20],
-        [page.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-20],
-        preferredWidth,
-    ]];
-
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillChange:)
-        name:UIKeyboardWillChangeFrameNotification object:nil];
-
-    [self refresh];
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
+    NSNotificationCenter *notes = [NSNotificationCenter defaultCenter];
+    [notes addObserver:self selector:@selector(keyboardWillChange:) name:UIKeyboardWillChangeFrameNotification object:nil];
+    [notes addObserver:self selector:@selector(resumeRefresh) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [notes addObserver:self selector:@selector(pauseRefresh) name:UIApplicationWillResignActiveNotification object:nil];
+    [self resumeRefresh];
 }
+
+- (void)setSelectedIndex:(NSUInteger)selectedIndex {
+    [super setSelectedIndex:selectedIndex];
+    [self updateFloatingTabBar];
+}
+
+- (void)setupFloatingTabBar {
+    UIView *bar = [[UIView alloc] init];
+    bar.backgroundColor = CardSurfaceColor();
+    bar.layer.cornerRadius = 30;
+    bar.layer.cornerCurve = kCACornerCurveContinuous;
+    bar.layer.shadowColor = [UIColor blackColor].CGColor;
+    bar.layer.shadowOpacity = 0.08f;
+    bar.layer.shadowRadius = 20;
+    bar.layer.shadowOffset = CGSizeMake(0, 6);
+    bar.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    bar.layer.borderColor = SubtleDividerColor().CGColor;
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:bar];
+    self.floatingBar = bar;
+
+    NSArray<NSString *> *titles = @[
+        T(@"连接", @"Connect"),
+        T(@"安全", @"Security"),
+        T(@"快捷键", @"Shortcuts"),
+    ];
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.distribution = UIStackViewDistributionFillEqually;
+    row.spacing = 6;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:row];
+
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.tag = (NSInteger)i;
+        [btn setTitle:titles[i] forState:UIControlStateNormal];
+        btn.titleLabel.font = FontWeight(UIFontTextStyleSubheadline, UIFontWeightBold);
+        btn.titleLabel.adjustsFontForContentSizeCategory = YES;
+        btn.layer.cornerRadius = 24;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        [btn.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+        [btn addTarget:self action:@selector(floatingTabTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [buttons addObject:btn];
+        [row addArrangedSubview:btn];
+    }
+    self.floatingTabButtons = buttons;
+
+    NSLayoutConstraint *wide = [bar.widthAnchor constraintEqualToConstant:420];
+    wide.priority = 750;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [bar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-16],
+        [bar.widthAnchor constraintLessThanOrEqualToConstant:420],
+        [bar.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor constant:-32],
+        wide,
+        [row.topAnchor constraintEqualToAnchor:bar.topAnchor constant:6],
+        [row.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-6],
+        [row.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:6],
+        [row.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-6],
+    ]];
+    [self updateFloatingTabBar];
+}
+
+static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
+    return FontForTraitsWeight(style, weight, nil);
+}
+
+- (void)floatingTabTapped:(UIButton *)sender {
+    [self dismissKeyboard];
+    self.selectedIndex = (NSUInteger)sender.tag;
+}
+
+- (void)updateFloatingTabBar {
+    if (!self.floatingTabButtons.count) return;
+    self.floatingBar.layer.borderColor = SubtleDividerColor().CGColor;
+    for (NSUInteger i = 0; i < self.floatingTabButtons.count; i++) {
+        UIButton *btn = self.floatingTabButtons[i];
+        BOOL active = (i == self.selectedIndex);
+        btn.backgroundColor = active ? PrimaryActionFillColor() : [UIColor clearColor];
+        UIColor *titleColor = active ? [UIColor whiteColor] : [UIColor secondaryLabelColor];
+        [btn setTitleColor:titleColor forState:UIControlStateNormal];
+        btn.accessibilityTraits = active ? (UIAccessibilityTraitButton | UIAccessibilityTraitSelected) : UIAccessibilityTraitButton;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self updateFloatingTabBar];
+}
+
+// 页面内容通栏滚动，所有卡片统一 28pt 大圆角并居中限制在 680pt。
+- (UIViewController *)pageWithTitle:(NSString *)title tab:(NSString *)tab symbol:(NSString *)symbol
+    sections:(NSArray<UIView *> *)sections {
+    UIViewController *controller = [[UIViewController alloc] init];
+    controller.title = title;
+    controller.view.backgroundColor = PageSurfaceColor();
+    controller.tabBarItem = [[UITabBarItem alloc] initWithTitle:tab image:[UIImage systemImageNamed:symbol] tag:self.scrollViews.count];
+
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.alwaysBounceVertical = YES;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:scroll];
+    [self.scrollViews addObject:scroll];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKeyboard)];
+    tap.cancelsTouchesInView = NO;
+    [scroll addGestureRecognizer:tap];
+
+    UIStackView *page = [[UIStackView alloc] initWithArrangedSubviews:sections];
+    page.axis = UILayoutConstraintAxisVertical;
+    page.spacing = 18;
+    page.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:page];
+    UILayoutGuide *content = scroll.contentLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:controller.view.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:controller.view.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:controller.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:controller.view.trailingAnchor],
+        [page.topAnchor constraintEqualToAnchor:content.topAnchor constant:20],
+        [page.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-104],
+        [page.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [page.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [content.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
+    ]];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:controller];
+    navigation.navigationBarHidden = YES;
+    return navigation;
+}
+
+// 卡片在通栏页面里居中，宽度上限 680pt，两侧至少 20pt。
+- (UIView *)insetSection:(UIView *)card {
+    UIView *holder = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [holder addSubview:card];
+    NSLayoutConstraint *fill = [card.widthAnchor constraintEqualToAnchor:holder.widthAnchor constant:-40];
+    fill.priority = 750;
+    [NSLayoutConstraint activateConstraints:@[
+        [card.topAnchor constraintEqualToAnchor:holder.topAnchor],
+        [card.bottomAnchor constraintEqualToAnchor:holder.bottomAnchor],
+        [card.centerXAnchor constraintEqualToAnchor:holder.centerXAnchor],
+        [card.widthAnchor constraintLessThanOrEqualToConstant:680],
+        [card.widthAnchor constraintLessThanOrEqualToAnchor:holder.widthAnchor constant:-40],
+        fill,
+    ]];
+    return holder;
+}
+
+- (void)dismissKeyboard { [self.view endEditing:YES]; }
+
+- (BOOL)tabBarController:(UITabBarController *)tabBarController shouldSelectViewController:(UIViewController *)viewController {
+    [self dismissKeyboard];
+    return YES;
+}
+
+- (void)resumeRefresh {
+    [self refresh];
+    if (!self.timer) self.timer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
+}
+
+- (void)pauseRefresh { [self.timer invalidate]; self.timer = nil; }
 
 #pragma mark - Cards
 
-// Returns the card; its content stack comes back through `stack`.
+// Returns a 28pt continuous-corner card; its content stack comes back through `stack`.
 - (UIView *)cardWithStack:(UIStackView **)stack {
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
-    card.layer.cornerRadius = 12;
+    card.backgroundColor = CardSurfaceColor();
+    card.layer.cornerRadius = 28;
     card.layer.cornerCurve = kCACornerCurveContinuous;
     UIStackView *s = [[UIStackView alloc] init];
     s.axis = UILayoutConstraintAxisVertical;
-    s.spacing = 8;
+    s.spacing = 16;
     s.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:s];
     [NSLayoutConstraint activateConstraints:@[
-        [s.topAnchor constraintEqualToAnchor:card.topAnchor constant:16],
-        [s.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16],
-        [s.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [s.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [s.topAnchor constraintEqualToAnchor:card.topAnchor constant:24],
+        [s.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-24],
+        [s.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:24],
+        [s.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-24],
     ]];
     *stack = s;
     return card;
 }
 
 - (UILabel *)cardTitle:(NSString *)text {
-    UILabel *l = Label(UIFontTextStyleHeadline, NO, [UIColor labelColor]);
+    UILabel *l = LabelWeight(UIFontTextStyleTitle3, UIFontWeightBold, [UIColor labelColor]);
     l.text = text;
     l.accessibilityTraits = UIAccessibilityTraitHeader;
     return l;
 }
 
-- (UIView *)statusCard {
-    UIStackView *stack;
-    UIView *card = [self cardWithStack:&stack];
+- (UIView *)hairlineInk:(BOOL)onHero {
+    UIView *line = [[UIView alloc] init];
+    line.backgroundColor = onHero ? [UIColor colorWithWhite:1.0 alpha:0.16] : SubtleDividerColor();
+    [line.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale].active = YES;
+    return line;
+}
 
-    self.dot = [[UIView alloc] init];
-    self.dot.layer.cornerRadius = 5;
-    self.dot.isAccessibilityElement = YES;
-    self.dot.translatesAutoresizingMaskIntoConstraints = NO;
+#pragma mark - Status Hero Card
+
+- (UIView *)statusPlateView {
+    UIView *plate = [[UIView alloc] init];
+    plate.backgroundColor = HeroSurfaceColor(HostOnline);
+    plate.layer.cornerRadius = 28;
+    plate.layer.cornerCurve = kCACornerCurveContinuous;
+    plate.clipsToBounds = YES;
+    self.statusPlate = plate;
+
+    HeroAsteriskView *watermark = [[HeroAsteriskView alloc] init];
+    watermark.translatesAutoresizingMaskIntoConstraints = NO;
+    [plate addSubview:watermark];
+    self.heroWatermark = watermark;
     [NSLayoutConstraint activateConstraints:@[
-        [self.dot.widthAnchor constraintEqualToConstant:10],
-        [self.dot.heightAnchor constraintEqualToConstant:10],
+        [watermark.widthAnchor constraintEqualToConstant:180],
+        [watermark.heightAnchor constraintEqualToConstant:180],
+        [watermark.trailingAnchor constraintEqualToAnchor:plate.trailingAnchor constant:24],
+        [watermark.centerYAnchor constraintEqualToAnchor:plate.centerYAnchor constant:-8],
     ]];
-    self.statusLabel = Label(UIFontTextStyleHeadline, NO, [UIColor labelColor]);
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.dot, self.statusLabel]];
-    row.spacing = 8;
-    row.alignment = UIStackViewAlignmentCenter;
-    [stack addArrangedSubview:row];
 
-    self.lastSessionLabel = Label(UIFontTextStyleSubheadline, NO, [UIColor secondaryLabelColor]);
-    [stack addArrangedSubview:self.lastSessionLabel];
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [plate addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:plate.topAnchor constant:24],
+        [stack.bottomAnchor constraintEqualToAnchor:plate.bottomAnchor constant:-24],
+        [stack.leadingAnchor constraintEqualToAnchor:plate.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintEqualToAnchor:plate.trailingAnchor constant:-24],
+    ]];
+
+    self.heroDeviceLabel = LabelWeight(UIFontTextStyleFootnote, UIFontWeightBold, HeroSecondaryTextColor());
+    self.heroDeviceLabel.text = [[UIDevice currentDevice].name uppercaseString];
+
+    self.statusBadgePill = [[UIView alloc] init];
+    self.statusBadgePill.backgroundColor = StatusBadgeFillColor(HostOnline);
+    self.statusBadgePill.layer.cornerRadius = 16;
+    self.statusBadgePill.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.statusBadgePill setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [self.statusBadgePill setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+    self.statusBadgeLabel = LabelWeight(UIFontTextStyleCaption1, UIFontWeightHeavy, StatusBadgeTextColor(HostOnline));
+    self.statusBadgeLabel.numberOfLines = 1;
+    self.statusBadgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.statusBadgePill addSubview:self.statusBadgeLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusBadgeLabel.topAnchor constraintEqualToAnchor:self.statusBadgePill.topAnchor constant:7],
+        [self.statusBadgeLabel.bottomAnchor constraintEqualToAnchor:self.statusBadgePill.bottomAnchor constant:-7],
+        [self.statusBadgeLabel.leadingAnchor constraintEqualToAnchor:self.statusBadgePill.leadingAnchor constant:14],
+        [self.statusBadgeLabel.trailingAnchor constraintEqualToAnchor:self.statusBadgePill.trailingAnchor constant:-14],
+    ]];
+
+    UIView *headSpacer = [[UIView alloc] init];
+    UIStackView *topRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.heroDeviceLabel, headSpacer, self.statusBadgePill]];
+    topRow.axis = UILayoutConstraintAxisHorizontal;
+    topRow.alignment = UIStackViewAlignmentCenter;
+    topRow.spacing = 12;
+    [stack addArrangedSubview:topRow];
+    [stack setCustomSpacing:6 afterView:topRow];
+
+    self.statusLabel = LabelWeight(UIFontTextStyleLargeTitle, UIFontWeightHeavy, HeroPrimaryTextColor());
+    self.statusLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    [stack addArrangedSubview:self.statusLabel];
+    [stack setCustomSpacing:4 afterView:self.statusLabel];
+
+    self.stateDetail = Label(UIFontTextStyleBody, NO, HeroSecondaryTextColor());
+    [stack addArrangedSubview:self.stateDetail];
+    [stack setCustomSpacing:22 afterView:self.stateDetail];
 
     self.qrView = [[UIImageView alloc] init];
     self.qrView.contentMode = UIViewContentModeScaleAspectFit;
     self.qrView.backgroundColor = [UIColor whiteColor]; // the QR needs a light quiet zone in dark mode too
-    self.qrView.layer.cornerRadius = 12;
+    self.qrView.layer.cornerRadius = 18;
+    self.qrView.layer.cornerCurve = kCACornerCurveContinuous;
     self.qrView.clipsToBounds = YES;
     self.qrView.layer.magnificationFilter = kCAFilterNearest;
     self.qrView.layer.minificationFilter = kCAFilterNearest;
@@ -387,108 +830,113 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         [self.qrView.widthAnchor constraintEqualToConstant:200],
         [self.qrView.heightAnchor constraintEqualToConstant:200],
     ]];
-    UILabel *hint = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    hint.textAlignment = NSTextAlignmentCenter;
-    hint.text = T(@"用手机上的「网易UU远程」App 扫码，并在手机上确认。",
-                  @"Scan with the UU Remote app on your phone and confirm there.");
-    self.qrGroup = [[UIStackView alloc] initWithArrangedSubviews:@[self.qrView, hint]];
+    self.qrGroup = [[UIStackView alloc] initWithArrangedSubviews:@[self.qrView]];
     self.qrGroup.axis = UILayoutConstraintAxisVertical;
     self.qrGroup.alignment = UIStackViewAlignmentCenter;
-    self.qrGroup.spacing = 12;
+    self.qrGroup.spacing = 0;
     self.qrGroup.hidden = YES;
     [stack addArrangedSubview:self.qrGroup];
-    [stack setCustomSpacing:16 afterView:self.lastSessionLabel];
-    return card;
+    [stack setCustomSpacing:22 afterView:self.qrGroup];
+
+    self.statusSymbolCircle = [[UIView alloc] init];
+    self.statusSymbolCircle.backgroundColor = StatusBadgeFillColor(HostOnline);
+    self.statusSymbolCircle.layer.cornerRadius = 22;
+    self.statusSymbolCircle.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusSymbolCircle.widthAnchor constraintEqualToConstant:44],
+        [self.statusSymbolCircle.heightAnchor constraintEqualToConstant:44],
+    ]];
+    self.statusSymbol = [[UIImageView alloc] init];
+    self.statusSymbol.contentMode = UIViewContentModeScaleAspectFit;
+    self.statusSymbol.tintColor = StatusBadgeTextColor(HostOnline);
+    self.statusSymbol.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.statusSymbolCircle addSubview:self.statusSymbol];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusSymbol.centerXAnchor constraintEqualToAnchor:self.statusSymbolCircle.centerXAnchor],
+        [self.statusSymbol.centerYAnchor constraintEqualToAnchor:self.statusSymbolCircle.centerYAnchor],
+    ]];
+
+    self.lastSessionTitleLabel = Label(UIFontTextStyleSubheadline, YES, HeroPrimaryTextColor());
+    self.lastSessionTitleLabel.text = T(@"最近连接", @"Last Session");
+    self.lastSessionLabel = Label(UIFontTextStyleFootnote, NO, HeroSecondaryTextColor());
+    UIStackView *sessionTextStack = [[UIStackView alloc] initWithArrangedSubviews:@[self.lastSessionTitleLabel, self.lastSessionLabel]];
+    sessionTextStack.axis = UILayoutConstraintAxisVertical;
+    sessionTextStack.spacing = 2;
+
+    UIStackView *sessionRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.statusSymbolCircle, sessionTextStack]];
+    sessionRow.axis = UILayoutConstraintAxisHorizontal;
+    sessionRow.spacing = 14;
+    sessionRow.alignment = UIStackViewAlignmentCenter;
+    [stack addArrangedSubview:sessionRow];
+    return plate;
 }
 
-- (UIView *)unlockCardView {
+#pragma mark - Account
+
+- (UIView *)accountCardView {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"自动解锁", @"Auto-unlock")]];
-    UILabel *desc = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    desc.text = T(@"远程连接时如果 iPad 处于锁屏，会用保存的密码自动解锁。",
-                  @"Unlocks the iPad with the saved passcode when a remote session starts on the lock screen.");
-    [stack addArrangedSubview:desc];
 
-    self.passcode = [NSMutableString string];
-    self.passcodeField = [self maskedFieldWithPlaceholder:T(@"iPad 锁屏密码", @"iPad passcode")];
+    self.accountAvatar = [[UIView alloc] init];
+    self.accountAvatar.backgroundColor = PrimaryActionFillColor();
+    self.accountAvatar.layer.cornerRadius = 24;
+    self.accountAvatar.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.accountAvatar.widthAnchor constraintEqualToConstant:48],
+        [self.accountAvatar.heightAnchor constraintEqualToConstant:48],
+    ]];
 
-    self.saveButton = [self buttonWithTitle:T(@"保存", @"Save") bold:YES action:@selector(savePasscode)];
-    self.clearButton = [self buttonWithTitle:T(@"清除", @"Clear") bold:NO action:@selector(clearPasscode)];
-    [self.clearButton setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    [self.clearButton setTitleColor:[UIColor tertiaryLabelColor] forState:UIControlStateDisabled];
+    self.accountSymbol = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"person.fill"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleHeadline]]];
+    self.accountSymbol.tintColor = [UIColor whiteColor];
+    self.accountSymbol.contentMode = UIViewContentModeScaleAspectFit;
+    self.accountSymbol.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.accountAvatar addSubview:self.accountSymbol];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.accountSymbol.centerXAnchor constraintEqualToAnchor:self.accountAvatar.centerXAnchor],
+        [self.accountSymbol.centerYAnchor constraintEqualToAnchor:self.accountAvatar.centerYAnchor],
+    ]];
 
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.passcodeField, self.saveButton, self.clearButton]];
-    row.spacing = 12;
+    self.accountCaptionLabel = LabelWeight(UIFontTextStyleCaption1, UIFontWeightBold, [UIColor secondaryLabelColor]);
+    self.accountCaptionLabel.text = T(@"账号", @"ACCOUNT");
+    self.accountCaptionLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.accountLabel = LabelWeight(UIFontTextStyleHeadline, UIFontWeightBold, [UIColor labelColor]);
+    UIStackView *metaStack = [[UIStackView alloc] initWithArrangedSubviews:@[self.accountCaptionLabel, self.accountLabel]];
+    metaStack.axis = UILayoutConstraintAxisVertical;
+    metaStack.spacing = 2;
+
+    self.logoutButton = [self pillSecondaryButtonWithTitle:T(@"退出登录", @"Sign Out") destructive:YES action:@selector(confirmLogout)];
+    UIView *spacer = [[UIView alloc] init];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.accountAvatar, metaStack, spacer, self.logoutButton]];
+    row.spacing = 14;
     row.alignment = UIStackViewAlignmentCenter;
-    [stack addArrangedSubview:row];
-    [stack setCustomSpacing:12 afterView:desc];
-
-    self.unlockLabel = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    [stack addArrangedSubview:self.unlockLabel];
-    [self updateButtons];
-    return card;
-}
-
-// Masked by hand: with secureTextEntry iOS hides the keyboard from screen capture, so a remote
-// viewer would see a grey box instead of the keys. The caller owns the backing string.
-- (UITextField *)maskedFieldWithPlaceholder:(NSString *)placeholder {
-    UITextField *f = [[UITextField alloc] init];
-    f.placeholder = placeholder;
-    f.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    f.adjustsFontForContentSizeCategory = YES;
-    f.delegate = self;
-    f.keyboardType = UIKeyboardTypeASCIICapable;
-    f.autocorrectionType = UITextAutocorrectionTypeNo;
-    f.spellCheckingType = UITextSpellCheckingTypeNo; // keep it out of keyboard learning
-    f.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    f.smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
-    f.textContentType = UITextContentTypeOneTimeCode; // keep it out of AutoFill/Keychain prompts
-    f.returnKeyType = UIReturnKeyDone;
-    f.borderStyle = UITextBorderStyleRoundedRect;
-    [f setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
-    [f.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
-    return f;
-}
-
-- (UIView *)accountCard {
-    UIStackView *stack;
-    UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"账号", @"Account")]];
-    self.accountLabel = Label(UIFontTextStyleBody, NO, [UIColor labelColor]);
-    self.logoutButton = [self buttonWithTitle:T(@"退出登录", @"Sign out") bold:NO action:@selector(confirmLogout)];
-    [self.logoutButton setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    [self.logoutButton setTitleColor:[UIColor tertiaryLabelColor] forState:UIControlStateDisabled];
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.accountLabel, self.logoutButton]];
-    row.spacing = 12;
-    row.alignment = UIStackViewAlignmentCenter;
-    [row.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
     [stack addArrangedSubview:row];
     return card;
 }
+
+#pragma mark - Install
 
 - (UIView *)installCardView {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"安装服务", @"Install service")]];
-    UILabel *desc = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    desc.text = T(@"把宿主服务安装到系统后才能被远程控制。", @"Install the host service to the system to allow remote control.");
-    [stack addArrangedSubview:desc];
+    [stack addArrangedSubview:[self cardTitle:T(@"安装服务", @"Install Daemon Service")]];
 
     self.installPassword = [NSMutableString string];
-    self.installField = [self maskedFieldWithPlaceholder:T(@"设备密码，默认 123", @"Device password, default 123")];
-    self.installButton = [self buttonWithTitle:T(@"安装", @"Install") bold:YES action:@selector(installService)];
+    self.installField = [self maskedFieldWithPlaceholder:T(@"Root / Sudo 密码（默认 123）", @"Root / Sudo Password (default 123)")];
+    self.installButton = [self buttonWithTitle:T(@"安装", @"Install Service") bold:YES action:@selector(installService)];
+    [self.installButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.installField, self.installButton]];
+    row.axis = UILayoutConstraintAxisVertical;
     row.spacing = 12;
-    row.alignment = UIStackViewAlignmentCenter;
+    row.alignment = UIStackViewAlignmentFill;
     self.installForm = row;
     [stack addArrangedSubview:row];
-    [stack setCustomSpacing:12 afterView:desc];
 
-    self.installResult = Label(UIFontTextStyleSubheadline, YES, [UIColor labelColor]);
+    self.installResult = MonoLabel(UIFontTextStyleFootnote, [UIColor secondaryLabelColor]);
     self.installResult.hidden = YES;
     [stack addArrangedSubview:self.installResult];
-    self.installOutput = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    self.installOutput = MonoLabel(UIFontTextStyleFootnote, [UIColor secondaryLabelColor]);
     self.installOutput.hidden = YES;
     [stack addArrangedSubview:self.installOutput];
     return card;
@@ -502,109 +950,317 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     [b setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [b setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [b.heightAnchor constraintGreaterThanOrEqualToConstant:50].active = YES;
+    [b.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    if (bold) {
+        UIButtonConfiguration *configuration = [UIButtonConfiguration filledButtonConfiguration];
+        configuration.baseBackgroundColor = PrimaryActionFillColor();
+        configuration.baseForegroundColor = [UIColor whiteColor];
+        configuration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+        configuration.contentInsets = NSDirectionalEdgeInsetsMake(13, 24, 13, 24);
+        b.configuration = configuration;
+    }
+    return b;
+}
+
+- (UIButton *)pillSecondaryButtonWithTitle:(NSString *)title destructive:(BOOL)destructive action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *cfg = [UIButtonConfiguration filledButtonConfiguration];
+    cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(10, 18, 10, 18);
+    cfg.baseBackgroundColor = SecondaryPillFillColor(destructive);
+    cfg.baseForegroundColor = SecondaryPillTextColor(destructive, YES);
+    b.configuration = cfg;
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = Font(UIFontTextStyleSubheadline, YES);
+    b.titleLabel.adjustsFontForContentSizeCategory = YES;
+    b.configurationUpdateHandler = ^(UIButton *button) {
+        UIButtonConfiguration *updated = button.configuration;
+        updated.baseBackgroundColor = SecondaryPillFillColor(destructive);
+        updated.baseForegroundColor = SecondaryPillTextColor(destructive, button.enabled);
+        button.configuration = updated;
+    };
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [b setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [b setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [b.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     [b.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     return b;
 }
 
+#pragma mark - Security
+
+- (UIView *)unlockCardView {
+    UIStackView *stack;
+    UIView *card = [self cardWithStack:&stack];
+
+    UILabel *title = [self cardTitle:T(@"自动解锁", @"Auto-unlock")];
+    self.unlockSymbol = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"circle"]];
+    self.unlockSymbol.contentMode = UIViewContentModeScaleAspectFit;
+    [self.unlockSymbol setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    self.unlockLabel = LabelWeight(UIFontTextStyleFootnote, UIFontWeightBold, [UIColor secondaryLabelColor]);
+
+    self.unlockStatusPill = [[UIView alloc] init];
+    self.unlockStatusPill.backgroundColor = FieldFillColor();
+    self.unlockStatusPill.layer.cornerRadius = 15;
+    self.unlockStatusPill.layer.cornerCurve = kCACornerCurveContinuous;
+    UIStackView *pillContent = [[UIStackView alloc] initWithArrangedSubviews:@[self.unlockSymbol, self.unlockLabel]];
+    pillContent.spacing = 6;
+    pillContent.alignment = UIStackViewAlignmentCenter;
+    pillContent.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.unlockStatusPill addSubview:pillContent];
+    [NSLayoutConstraint activateConstraints:@[
+        [pillContent.topAnchor constraintEqualToAnchor:self.unlockStatusPill.topAnchor constant:6],
+        [pillContent.bottomAnchor constraintEqualToAnchor:self.unlockStatusPill.bottomAnchor constant:-6],
+        [pillContent.leadingAnchor constraintEqualToAnchor:self.unlockStatusPill.leadingAnchor constant:12],
+        [pillContent.trailingAnchor constraintEqualToAnchor:self.unlockStatusPill.trailingAnchor constant:-12],
+    ]];
+
+    UIView *headSpacer = [[UIView alloc] init];
+    UIStackView *headerRow = [[UIStackView alloc] initWithArrangedSubviews:@[title, headSpacer, self.unlockStatusPill]];
+    headerRow.axis = UILayoutConstraintAxisHorizontal;
+    headerRow.alignment = UIStackViewAlignmentCenter;
+    headerRow.spacing = 12;
+    [stack addArrangedSubview:headerRow];
+
+    self.passcode = [NSMutableString string];
+    self.passcodeField = [self maskedFieldWithPlaceholder:T(@"iPad 锁屏密码", @"iPad Passcode")];
+    [stack addArrangedSubview:self.passcodeField];
+
+    self.saveButton = [self buttonWithTitle:T(@"保存", @"Save") bold:YES action:@selector(savePasscode)];
+    self.clearButton = [self pillSecondaryButtonWithTitle:T(@"清除", @"Clear") destructive:YES action:@selector(clearPasscode)];
+
+    UIView *spacer = [[UIView alloc] init];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[spacer, self.clearButton, self.saveButton]];
+    row.spacing = 10;
+    row.alignment = UIStackViewAlignmentCenter;
+    [stack addArrangedSubview:row];
+    [self updateButtons];
+    return card;
+}
+
+// Masked by hand: with secureTextEntry iOS hides the keyboard from screen capture, so a remote
+// viewer would see a grey box instead of the keys. The caller owns the backing string.
+- (UITextField *)maskedFieldWithPlaceholder:(NSString *)placeholder {
+    PaddedTextField *f = [[PaddedTextField alloc] init];
+    f.placeholder = placeholder;
+    f.accessibilityLabel = placeholder;
+    f.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    f.adjustsFontForContentSizeCategory = YES;
+    f.delegate = self;
+    f.keyboardType = UIKeyboardTypeASCIICapable;
+    f.autocorrectionType = UITextAutocorrectionTypeNo;
+    f.spellCheckingType = UITextSpellCheckingTypeNo; // keep it out of keyboard learning
+    f.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    f.smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
+    f.textContentType = UITextContentTypeOneTimeCode; // keep it out of AutoFill/Keychain prompts
+    f.returnKeyType = UIReturnKeyDone;
+    f.borderStyle = UITextBorderStyleNone;
+    f.backgroundColor = FieldFillColor();
+    f.layer.cornerRadius = 22;
+    f.layer.cornerCurve = kCACornerCurveContinuous;
+    [f setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [f.heightAnchor constraintGreaterThanOrEqualToConstant:52].active = YES;
+    return f;
+}
+
 - (UIView *)lockCard {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    UILabel *title = Label(UIFontTextStyleBody, NO, [UIColor labelColor]);
-    title.text = T(@"远程结束后锁屏", @"Lock when the session ends");
+
+    UIView *badge = [[UIView alloc] init];
+    badge.backgroundColor = FieldFillColor();
+    badge.layer.cornerRadius = 22;
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [badge.widthAnchor constraintEqualToConstant:44],
+        [badge.heightAnchor constraintEqualToConstant:44],
+    ]];
+    UIImageView *lockIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"lock.fill"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody]]];
+    lockIcon.tintColor = [UIColor labelColor];
+    lockIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [badge addSubview:lockIcon];
+    [NSLayoutConstraint activateConstraints:@[
+        [lockIcon.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor],
+        [lockIcon.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor],
+    ]];
+
+    UILabel *title = LabelWeight(UIFontTextStyleHeadline, UIFontWeightBold, [UIColor labelColor]);
+    title.text = T(@"远程结束后锁屏", @"Lock After Session");
     self.lockSwitch = [[UISwitch alloc] init];
+    self.lockSwitch.onTintColor = PrimaryActionFillColor();
     self.lockSwitch.accessibilityLabel = title.text;
     [self.lockSwitch addTarget:self action:@selector(lockSwitchChanged) forControlEvents:UIControlEventValueChanged];
     [self.lockSwitch setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [self.lockSwitch setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[title, self.lockSwitch]];
-    row.spacing = 12;
+    UIView *spacer = [[UIView alloc] init];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[badge, title, spacer, self.lockSwitch]];
+    row.spacing = 14;
     row.alignment = UIStackViewAlignmentCenter;
-    [row.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
     [stack addArrangedSubview:row];
-    UILabel *desc = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    desc.text = T(@"最后一个远程连接结束后，iPad 会锁屏。", @"Locks the iPad when the last remote session ends.");
-    [stack addArrangedSubview:desc];
     return card;
 }
+
+#pragma mark - Shortcuts
 
 - (UIView *)shortcutsCard {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"远程快捷键", @"Remote shortcuts")]];
 
-    // {Windows key, Mac key, action}
-    NSArray<NSArray<NSString *> *> *keys = @[
-        @[@"Ctrl+C", @"Cmd+C", T(@"复制", @"Copy")],
-        @[@"Ctrl+V", @"Cmd+V", T(@"粘贴", @"Paste")],
-        @[@"Ctrl+A", @"Cmd+A", T(@"全选", @"Select all")],
-        @[@"Ctrl+Z", @"Cmd+Z", T(@"撤销", @"Undo")],
-        @[@"Alt+Tab", @"Cmd+Tab", T(@"切换 App", @"Switch apps")],
-        @[@"Win+Tab", @"Ctrl+\u2191", T(@"多任务界面", @"App switcher")],
-        @[[@"Win+D " stringByAppendingString:T(@"或 Ctrl+H", @"or Ctrl+H")], @"Cmd+H", T(@"回桌面", @"Home screen")],
-        @[@"Win+Space", @"Ctrl+Space", T(@"切换输入法", @"Switch input method")],
-        @[@"Ctrl+Space", @"Cmd+Space", @"Spotlight"],
+    UILabel *title = [self cardTitle:T(@"远程快捷键", @"Remote Shortcuts")];
+    self.shortcutPlatform = [[UISegmentedControl alloc] initWithItems:@[@"Windows", @"macOS"]];
+    self.shortcutPlatform.selectedSegmentIndex = 0;
+    self.shortcutPlatform.accessibilityLabel = T(@"控制端系统", @"Controller platform");
+    [self.shortcutPlatform.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.shortcutPlatform addTarget:self action:@selector(shortcutPlatformChanged) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *headStack = [[UIStackView alloc] initWithArrangedSubviews:@[title, self.shortcutPlatform]];
+    headStack.axis = UILayoutConstraintAxisVertical;
+    headStack.spacing = 14;
+    [stack addArrangedSubview:headStack];
+
+    // 动作在左，按键在右；两种控制端分开显示，窄窗与大字号不再挤压三列。
+    self.shortcutValues = @[
+        @{@"action": T(@"复制", @"Copy"), @"win": @[@[@"Ctrl", @"C"]], @"mac": @[@[@"Cmd", @"C"]]},
+        @{@"action": T(@"粘贴", @"Paste"), @"win": @[@[@"Ctrl", @"V"]], @"mac": @[@[@"Cmd", @"V"]]},
+        @{@"action": T(@"全选", @"Select all"), @"win": @[@[@"Ctrl", @"A"]], @"mac": @[@[@"Cmd", @"A"]]},
+        @{@"action": T(@"撤销", @"Undo"), @"win": @[@[@"Ctrl", @"Z"]], @"mac": @[@[@"Cmd", @"Z"]]},
+        @{@"action": T(@"切换 App", @"Switch apps"), @"win": @[@[@"Alt", @"Tab"]], @"mac": @[@[@"Cmd", @"Tab"]]},
+        @{@"action": T(@"多任务界面", @"App switcher"), @"win": @[@[@"Win", @"Tab"]], @"mac": @[@[@"Ctrl", @"↑"]]},
+        @{@"action": T(@"回桌面", @"Home screen"),
+            @"win": @[@[@"Win", @"D"], @[@"Ctrl", @"H"]], @"mac": @[@[@"Cmd", @"H"]]},
+        @{@"action": T(@"切换输入法", @"Switch input method"),
+            @"win": @[@[@"Win", @"Space"]], @"mac": @[@[@"Ctrl", @"Space"]]},
+        @{@"action": @"Spotlight", @"win": @[@[@"Ctrl", @"Space"]], @"mac": @[@[@"Cmd", @"Space"]]},
     ];
-    UIStackView *rows = [[UIStackView alloc] init];
-    rows.axis = UILayoutConstraintAxisVertical;
-    rows.spacing = 6;
-    NSMutableArray<UILabel *> *winLabels = [NSMutableArray array];
-    for (NSArray<NSString *> *k in keys) {
-        UILabel *win = Label(UIFontTextStyleFootnote, NO, [UIColor labelColor]);
-        win.text = k[0];
-        win.numberOfLines = 1;
-        UILabel *mac = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-        mac.text = [@"Mac " stringByAppendingString:k[1]];
-        mac.numberOfLines = 1;
-        [winLabels addObject:win];
-        UIStackView *left = [[UIStackView alloc] initWithArrangedSubviews:@[win, mac]];
-        left.spacing = 12;
-        [rows addArrangedSubview:[self shortcutRow:left action:k[2]]];
-    }
-    NSArray<NSArray<NSString *> *> *mouse = @[
-        @[T(@"鼠标从屏幕最底部往上拖", @"Mouse: drag up from the bottom edge"), T(@"回桌面", @"Home screen")],
-        @[T(@"往上拖并停住 0.3 秒", @"Drag up and hold 0.3 s"), T(@"多任务界面", @"App switcher")],
-        @[T(@"在屏幕最底部左右拖", @"Drag sideways at the bottom edge"), T(@"切到上一个 App", @"Previous app")],
+    self.shortcutRows = [[UIStackView alloc] init];
+    self.shortcutRows.axis = UILayoutConstraintAxisVertical;
+    self.shortcutRows.spacing = 4;
+    [stack addArrangedSubview:self.shortcutRows];
+
+    [stack setCustomSpacing:16 afterView:self.shortcutRows];
+    UIView *gestureRule = [self hairlineInk:NO];
+    [stack addArrangedSubview:gestureRule];
+    [stack setCustomSpacing:12 afterView:gestureRule];
+    UILabel *gestureTitle = LabelWeight(UIFontTextStyleFootnote, UIFontWeightBold, [UIColor secondaryLabelColor]);
+    gestureTitle.text = T(@"底边手势", @"Bottom Edge Gestures");
+    gestureTitle.accessibilityTraits = UIAccessibilityTraitHeader;
+    [stack addArrangedSubview:gestureTitle];
+    NSArray<NSDictionary *> *mouse = @[
+        @{@"action": T(@"回桌面", @"Home screen"), @"input": T(@"底边上滑", @"Swipe up")},
+        @{@"action": T(@"多任务界面", @"App switcher"), @"input": T(@"上滑并停留 0.3 秒", @"Up and hold 0.3 s")},
+        @{@"action": T(@"切到上一个 App", @"Previous app"), @"input": T(@"底边横滑", @"Swipe across")},
     ];
-    UIView *gap = [[UIView alloc] init];
-    [gap.heightAnchor constraintEqualToConstant:4].active = YES;
-    [rows addArrangedSubview:gap];
-    for (NSArray<NSString *> *m in mouse) {
-        UILabel *gesture = Label(UIFontTextStyleFootnote, NO, [UIColor labelColor]);
-        gesture.text = m[0];
-        [rows addArrangedSubview:[self shortcutRow:gesture action:m[1]]];
+    for (NSDictionary *m in mouse) {
+        UIView *row = [self shortcutRow:m[@"action"] trailing:[self plainKey:m[@"input"]] spoken:m[@"input"]];
+        [stack addArrangedSubview:row];
     }
-    [stack addArrangedSubview:rows];
-    // Line the Mac column up across rows. Activated only now: a constraint between two views that
-    // share no ancestor yet makes UIKit throw (NSLayoutConstraintIsPotentiallyDanglyInContainer).
-    for (NSUInteger i = 1; i < winLabels.count; i++) {
-        [winLabels[i].widthAnchor constraintEqualToAnchor:winLabels[0].widthAnchor].active = YES;
-    }
+    [self rebuildShortcutRows];
     return card;
 }
 
-- (UIView *)shortcutRow:(UIView *)left action:(NSString *)action {
-    UILabel *right = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-    right.text = action;
-    right.textAlignment = NSTextAlignmentRight;
-    [left setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisHorizontal];
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[left, right]];
-    row.spacing = 12;
-    row.alignment = UIStackViewAlignmentFirstBaseline;
-    row.isAccessibilityElement = YES;
-    row.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", action,
-        [left isKindOfClass:[UILabel class]] ? ((UILabel *)left).text
-            : [[((UIStackView *)left).arrangedSubviews valueForKey:@"text"] componentsJoinedByString:@", "]];
+- (UIView *)plainKey:(NSString *)text {
+    UIView *pill = [[UIView alloc] init];
+    pill.backgroundColor = FieldFillColor();
+    pill.layer.cornerRadius = 10;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
+    UILabel *l = LabelWeight(UIFontTextStyleSubheadline, UIFontWeightMedium, [UIColor secondaryLabelColor]);
+    l.text = text;
+    l.textAlignment = NSTextAlignmentRight;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    [pill addSubview:l];
+    [NSLayoutConstraint activateConstraints:@[
+        [l.topAnchor constraintEqualToAnchor:pill.topAnchor constant:5],
+        [l.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor constant:-5],
+        [l.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:10],
+        [l.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-10],
+    ]];
+    return pill;
+}
+
+- (UIView *)keycap:(NSString *)key {
+    UIView *cap = [[UIView alloc] init];
+    cap.backgroundColor = FieldFillColor();
+    cap.layer.cornerRadius = 10;
+    cap.layer.cornerCurve = kCACornerCurveContinuous;
+    UILabel *l = Label(UIFontTextStyleSubheadline, YES, [UIColor labelColor]);
+    l.text = key;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    [cap addSubview:l];
+    [NSLayoutConstraint activateConstraints:@[
+        [l.topAnchor constraintEqualToAnchor:cap.topAnchor constant:5],
+        [l.bottomAnchor constraintEqualToAnchor:cap.bottomAnchor constant:-5],
+        [l.leadingAnchor constraintEqualToAnchor:cap.leadingAnchor constant:10],
+        [l.trailingAnchor constraintEqualToAnchor:cap.trailingAnchor constant:-10],
+        [cap.heightAnchor constraintGreaterThanOrEqualToConstant:30],
+    ]];
+    return cap;
+}
+
+- (UIView *)keyGroups:(NSArray<NSArray<NSString *> *> *)groups {
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 6;
+    row.alignment = UIStackViewAlignmentCenter;
+    for (NSUInteger g = 0; g < groups.count; g++) {
+        if (g > 0) {
+            UILabel *or = Label(UIFontTextStyleFootnote, NO, [UIColor tertiaryLabelColor]);
+            or.text = T(@"或", @"or");
+            [row addArrangedSubview:or];
+        }
+        UIStackView *combo = [[UIStackView alloc] init];
+        combo.axis = UILayoutConstraintAxisHorizontal;
+        combo.spacing = 5;
+        combo.alignment = UIStackViewAlignmentCenter;
+        for (NSString *key in groups[g]) [combo addArrangedSubview:[self keycap:key]];
+        [row addArrangedSubview:combo];
+    }
     return row;
 }
+
+- (UIView *)shortcutRow:(NSString *)action trailing:(UIView *)trailing spoken:(NSString *)spoken {
+    UILabel *left = LabelWeight(UIFontTextStyleBody, UIFontWeightMedium, [UIColor labelColor]);
+    left.text = action;
+    [left setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    UIView *spacer = [[UIView alloc] init];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[left, spacer, trailing]];
+    row.spacing = 12;
+    row.alignment = UIStackViewAlignmentCenter;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    row.isAccessibilityElement = YES;
+    row.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", action, spoken];
+    return row;
+}
+
+- (void)rebuildShortcutRows {
+    for (UIView *v in self.shortcutRows.arrangedSubviews) [v removeFromSuperview];
+    NSInteger platform = self.shortcutPlatform.selectedSegmentIndex;
+    NSMutableArray<NSString *> *texts = [NSMutableArray array];
+    for (NSDictionary *item in self.shortcutValues) {
+        NSArray<NSArray<NSString *> *> *groups = platform == 0 ? item[@"win"] : item[@"mac"];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSArray<NSString *> *combo in groups) [parts addObject:[combo componentsJoinedByString:@"+"]];
+        NSString *spoken = [parts componentsJoinedByString:T(@" 或 ", @" or ")];
+        [texts addObject:spoken];
+        [self.shortcutRows addArrangedSubview:[self shortcutRow:item[@"action"]
+            trailing:[self keyGroups:groups] spoken:spoken]];
+    }
+    self.shortcutKeyTexts = texts;
+}
+
+- (void)shortcutPlatformChanged { [self rebuildShortcutRows]; }
+
+#pragma mark - History
 
 - (UIView *)historyCard {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"连接记录", @"Recent sessions")]];
+    [stack addArrangedSubview:[self cardTitle:T(@"连接记录", @"Recent Connections")]];
     self.historyRows = [[UIStackView alloc] init];
     self.historyRows.axis = UILayoutConstraintAxisVertical;
-    self.historyRows.spacing = 8;
+    self.historyRows.spacing = 0;
     [stack addArrangedSubview:self.historyRows];
     return card;
 }
@@ -615,7 +1271,7 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     NSMutableString *value = field == self.installField ? self.installPassword : self.passcode;
     if (NSMaxRange(range) > value.length) range = NSMakeRange(value.length, 0);
     [value replaceCharactersInRange:range withString:text];
-    field.text = [@"" stringByPaddingToLength:value.length withString:@"\u2022" startingAtIndex:0];
+    field.text = [@"" stringByPaddingToLength:value.length withString:@"•" startingAtIndex:0];
     [self updateButtons];
     return NO;
 }
@@ -648,6 +1304,7 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         // A result from the previous passcode no longer applies.
         [[NSFileManager defaultManager] removeItemAtPath:kUnlockStatusPath error:nil];
         self.unlockNotice = nil;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
     } else {
         self.unlockNotice = T(@"保存失败，请重试", @"Couldn't save; try again");
         self.unlockNoticeUntil = [NSDate dateWithTimeIntervalSinceNow:4];
@@ -667,7 +1324,7 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 
 - (void)confirmLogout {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:T(@"退出登录？", @"Sign out?")
-        message:T(@"退出后需要重新扫码登录。", @"You will need to scan the QR code to sign in again.")
+        message:nil
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:T(@"取消", @"Cancel") style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:T(@"退出登录", @"Sign out") style:UIAlertActionStyleDestructive
@@ -702,8 +1359,9 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         dispatch_async(dispatch_get_main_queue(), ^{
             self.installing = NO;
             self.installFinished = YES;
-            self.installResult.text = ok ? T(@"安装完成", @"Installed")
-                : timedOut ? T(@"安装超时", @"Install timed out") : T(@"安装失败", @"Install failed");
+            NSString *statusWord = ok ? T(@"安装完成", @"installed")
+                : timedOut ? T(@"安装超时", @"timed out") : T(@"安装失败", @"failed");
+            self.installResult.text = [NSString stringWithFormat:@"$ status: %@", statusWord];
             self.installResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
             self.installOutput.text = output;
             [self refresh];
@@ -723,35 +1381,111 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 #pragma mark - Keyboard
 
 - (void)keyboardWillChange:(NSNotification *)note {
+    UIScrollView *scrollView = self.scrollViews[self.selectedIndex];
+    // 切换标签页时键盘退场通知可能晚到，清掉上一页的键盘留白。
+    for (UIScrollView *other in self.scrollViews) {
+        if (other == scrollView) continue;
+        other.contentInset = UIEdgeInsetsZero;
+        other.verticalScrollIndicatorInsets = UIEdgeInsetsZero;
+    }
     CGRect end = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    end = [self.view convertRect:end fromCoordinateSpace:[UIScreen mainScreen].coordinateSpace];
+    end = [scrollView convertRect:end fromCoordinateSpace:[UIScreen mainScreen].coordinateSpace];
     // Plain arithmetic: build.sh does not link CoreGraphics, so CGRect* functions are unavailable.
-    CGRect b = self.view.bounds;
+    CGRect b = scrollView.bounds;
     BOOL across = end.origin.x < b.origin.x + b.size.width && end.origin.x + end.size.width > b.origin.x;
     CGFloat height = across ? MAX(0, MIN(b.origin.y + b.size.height, end.origin.y + end.size.height)
                                      - MAX(b.origin.y, end.origin.y)) : 0;
     // The automatic inset already covers the bottom safe area.
-    CGFloat bottom = MAX(0, height - self.view.safeAreaInsets.bottom);
+    CGFloat bottom = MAX(0, height - scrollView.adjustedContentInset.bottom + scrollView.contentInset.bottom);
     NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     [UIView animateWithDuration:duration animations:^{
-        UIEdgeInsets inset = self.scrollView.contentInset;
+        UIEdgeInsets inset = scrollView.contentInset;
         inset.bottom = bottom;
-        self.scrollView.contentInset = inset;
-        UIEdgeInsets indicator = self.scrollView.verticalScrollIndicatorInsets;
+        scrollView.contentInset = inset;
+        UIEdgeInsets indicator = scrollView.verticalScrollIndicatorInsets;
         indicator.bottom = bottom;
-        self.scrollView.verticalScrollIndicatorInsets = indicator;
+        scrollView.verticalScrollIndicatorInsets = indicator;
     } completion:^(BOOL finished) {
         UIView *owner = self.passcodeField.isFirstResponder ? self.unlockCard : self.installField.isFirstResponder ? self.installCard : nil;
         if (bottom > 0 && owner) {
-            CGRect r = [owner convertRect:owner.bounds toView:self.scrollView];
+            CGRect r = [owner convertRect:owner.bounds toView:scrollView];
             r.origin.y -= 12;
             r.size.height += 24;
-            [self.scrollView scrollRectToVisible:r animated:YES];
+            [scrollView scrollRectToVisible:r animated:!UIAccessibilityIsReduceMotionEnabled()];
         }
     }];
 }
 
 #pragma mark - Refresh
+
+// 仅“正在远控”时呼吸，用来区分实时状态；减少动态效果或后台时不跑动画。
+- (void)updateLivePulse:(BOOL)live {
+    if (live && self.view.window && !UIAccessibilityIsReduceMotionEnabled()) {
+        if ([self.statusSymbolCircle.layer animationForKey:@"live"]) return;
+        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        pulse.fromValue = @1.0;
+        pulse.toValue = @0.55;
+        pulse.duration = 1.6;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = 1e9;
+        pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.statusSymbolCircle.layer addAnimation:pulse forKey:@"live"];
+    } else {
+        [self.statusSymbolCircle.layer removeAnimationForKey:@"live"];
+    }
+}
+
+- (void)displayState:(HostState)state viewers:(NSInteger)viewers {
+    NSString *text, *badge, *detail, *symbol;
+    switch (state) {
+        case HostDown:
+            text = T(@"服务未运行", @"Host Offline");
+            badge = T(@"服务离线", @"HOST OFFLINE");
+            detail = T(@"后台服务没有响应", @"Service not responding");
+            symbol = @"minus"; break;
+        case HostActive:
+            text = T(@"正在远控", @"Session Active");
+            badge = T(@"实时连接", @"SESSION LIVE");
+            detail = [NSString stringWithFormat:T(@"%ld 个连接", @"%ld connected"), (long)viewers];
+            symbol = @"dot.radiowaves.left.and.right"; break;
+        case HostWaiting:
+            text = T(@"等待扫码", @"Sign In");
+            badge = T(@"扫码登录", @"SCAN QR");
+            detail = T(@"未登录", @"Not signed in");
+            symbol = @"qrcode"; break;
+        case HostOnline:
+            text = T(@"已上线", @"Online");
+            badge = T(@"在线就绪", @"HOST ONLINE");
+            detail = T(@"等待连接", @"Waiting for connection...");
+            symbol = @"arrow.right"; break;
+    }
+    BOOL changed = !self.hasDisplayedState || self.displayedState != state;
+    void (^update)(void) = ^{
+        self.statusPlate.backgroundColor = HeroSurfaceColor(state);
+        SetText(self.statusLabel, text);
+        SetText(self.statusBadgeLabel, badge);
+        SetText(self.stateDetail, detail);
+        self.statusBadgePill.backgroundColor = StatusBadgeFillColor(state);
+        self.statusBadgeLabel.textColor = StatusBadgeTextColor(state);
+        self.statusSymbolCircle.backgroundColor = StatusBadgeFillColor(state);
+        self.statusSymbol.tintColor = StatusBadgeTextColor(state);
+        if (changed) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightBold];
+            self.statusSymbol.image = [UIImage systemImageNamed:symbol withConfiguration:cfg];
+        }
+    };
+    // 仅真实状态变化时转场；轮询刷新、后台和首次绘制不产生动画。
+    if (changed && self.hasDisplayedState && self.view.window && self.selectedIndex == 0
+        && [UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+        [UIView transitionWithView:self.statusPlate duration:UIAccessibilityIsReduceMotionEnabled() ? 0.1 : 0.22
+            options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionBeginFromCurrentState
+            | UIViewAnimationOptionAllowUserInteraction animations:update completion:nil];
+        UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, text);
+    } else update();
+    [self updateLivePulse:state == HostActive];
+    self.displayedState = state;
+    self.hasDisplayedState = YES;
+}
 
 - (void)refresh {
     NSString *loginStatus = Trimmed([NSString stringWithContentsOfFile:kStatusPath encoding:NSUTF8StringEncoding error:nil]);
@@ -764,23 +1498,13 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     else if ([loginStatus isEqualToString:@"waiting-scan"]) state = HostWaiting;
     else state = HostOnline;
 
-    NSString *text;
-    UIColor *color;
-    switch (state) {
-        case HostDown: text = T(@"宿主未运行", @"Host not running"); color = [UIColor systemGrayColor]; break;
-        case HostActive: text = T(@"正在被远程控制", @"Remote session active"); color = [UIColor systemGreenColor]; break;
-        case HostWaiting: text = T(@"等待扫码登录", @"Waiting for sign-in"); color = [UIColor systemOrangeColor]; break;
-        case HostOnline: text = T(@"已上线，等待连接", @"Online, waiting for a connection"); color = [UIColor systemBlueColor]; break;
-    }
-    SetText(self.statusLabel, text);
-    if (![self.dot.backgroundColor isEqual:color]) self.dot.backgroundColor = color;
-    if (![self.dot.accessibilityLabel isEqualToString:text]) self.dot.accessibilityLabel = text;
+    [self displayState:state viewers:(NSInteger)Number(status[@"viewers"])];
 
     NSDictionary *last = history.lastObject;
     SetText(self.lastSessionLabel, last
-        ? [NSString stringWithFormat:T(@"最近一次远程：%@，用时 %@", @"Last session: %@, %@"),
+        ? [NSString stringWithFormat:@"%@ · %@",
               WhenText([NSDate dateWithTimeIntervalSince1970:Number(last[@"at"])]), DurationText(Number(last[@"duration_s"]))]
-        : T(@"还没有远程连接", @"No remote connections yet"));
+        : T(@"暂无连接记录", @"No sessions yet"));
 
     [self refreshQR:state == HostWaiting];
     [self refreshAccount:[status[@"signed_in"] boolValue]];
@@ -797,7 +1521,9 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 
 - (void)refreshAccount:(BOOL)signedIn {
     SetText(self.accountLabel, signedIn ? T(@"已登录", @"Signed in") : T(@"未登录", @"Signed out"));
-    NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…") : T(@"退出登录", @"Sign out");
+    self.accountAvatar.backgroundColor = signedIn ? PrimaryActionFillColor() : FieldFillColor();
+    self.accountSymbol.tintColor = signedIn ? [UIColor whiteColor] : [UIColor tertiaryLabelColor];
+    NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…") : T(@"退出登录", @"Sign Out");
     if (![[self.logoutButton titleForState:UIControlStateNormal] isEqualToString:title]) {
         [UIView performWithoutAnimation:^{
             [self.logoutButton setTitle:title forState:UIControlStateNormal];
@@ -809,9 +1535,11 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 }
 
 - (void)refreshInstall:(BOOL)installed {
+    // 隐藏外层容器，否则被隐藏的卡片仍占着整段高度。
+    SetHidden(self.installSection, installed && !self.installFinished && !self.installing);
     SetHidden(self.installCard, installed && !self.installFinished && !self.installing);
     SetHidden(self.installForm, installed);
-    NSString *title = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装", @"Install");
+    NSString *title = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装", @"Install Service");
     if (![[self.installButton titleForState:UIControlStateNormal] isEqualToString:title]) {
         [UIView performWithoutAnimation:^{
             [self.installButton setTitle:title forState:UIControlStateNormal];
@@ -842,9 +1570,14 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
 
 - (void)refreshUnlock {
     [self updateButtons];
+    NSString *symbol = @"circle";
+    UIColor *symbolColor = [UIColor tertiaryLabelColor];
     if (self.unlockNotice && [self.unlockNoticeUntil timeIntervalSinceNow] > 0) {
         SetText(self.unlockLabel, self.unlockNotice);
         SetColor(self.unlockLabel, [UIColor systemRedColor]);
+        symbol = @"exclamationmark.circle.fill";
+        symbolColor = [UIColor systemRedColor];
+        [self setUnlockSymbol:symbol color:symbolColor];
         return;
     }
     self.unlockNotice = nil;
@@ -853,16 +1586,32 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
         componentsSeparatedByString:@" "];
     NSString *text = saved ? T(@"已保存", @"Saved") : T(@"未保存", @"Not saved");
     UIColor *color = [UIColor secondaryLabelColor];
+    if (saved) {
+        symbol = @"checkmark.circle.fill";
+        symbolColor = [UIColor secondaryLabelColor];
+    }
     if (saved && parts.count == 2 && [parts[0] isEqualToString:@"ok"]) {
         NSString *when = WhenText([NSDate dateWithTimeIntervalSince1970:[parts[1] doubleValue]]);
-        text = [NSString stringWithFormat:T(@"上次自动解锁成功（%@）", @"Last auto-unlock succeeded (%@)"), when];
+        text = [NSString stringWithFormat:T(@"已解锁 · %@", @"Unlocked · %@"), when];
         color = [UIColor systemGreenColor];
+        symbol = @"checkmark.circle.fill";
+        symbolColor = [UIColor systemGreenColor];
     } else if (saved && parts.count == 2 && [parts[0] isEqualToString:@"rejected"]) {
-        text = T(@"上次密码被拒绝，请重新保存正确的密码", @"The saved passcode was rejected; save it again");
+        text = T(@"密码被拒，请重存", @"Rejected · Save again");
         color = [UIColor systemRedColor];
+        symbol = @"exclamationmark.triangle.fill";
+        symbolColor = [UIColor systemRedColor];
     }
     SetText(self.unlockLabel, text);
     SetColor(self.unlockLabel, color);
+    [self setUnlockSymbol:symbol color:symbolColor];
+}
+
+- (void)setUnlockSymbol:(NSString *)name color:(UIColor *)color {
+    UIImage *image = [UIImage systemImageNamed:name
+        withConfiguration:[UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleFootnote]];
+    if (image != self.unlockSymbol.image) self.unlockSymbol.image = image;
+    if (![self.unlockSymbol.tintColor isEqual:color]) self.unlockSymbol.tintColor = color;
 }
 
 - (void)refreshHistory:(NSArray<NSDictionary *> *)history {
@@ -876,23 +1625,35 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     self.historyShown = items;
     for (UIView *v in self.historyRows.arrangedSubviews) [v removeFromSuperview];
     if (items.count == 0) {
-        UILabel *empty = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
-        empty.text = T(@"还没有远程连接记录", @"No remote sessions yet");
+        UILabel *empty = Label(UIFontTextStyleSubheadline, NO, [UIColor secondaryLabelColor]);
+        empty.text = T(@"暂无连接记录", @"No recent sessions");
         [self.historyRows addArrangedSubview:empty];
         return;
     }
-    for (NSArray<NSString *> *item in items) {
-        UILabel *when = Label(UIFontTextStyleSubheadline, NO, [UIColor labelColor]);
+    for (NSUInteger i = 0; i < items.count; i++) {
+        NSArray<NSString *> *item = items[i];
+        UILabel *when = LabelWeight(UIFontTextStyleHeadline, UIFontWeightBold, [UIColor labelColor]);
         when.text = item[0];
         UILabel *duration = Label(UIFontTextStyleSubheadline, NO, [UIColor secondaryLabelColor]);
         duration.text = item[1];
-        duration.textAlignment = NSTextAlignmentRight;
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[when, duration]];
+        UIStackView *leftStack = [[UIStackView alloc] initWithArrangedSubviews:@[when, duration]];
+        leftStack.axis = UILayoutConstraintAxisVertical;
+        leftStack.spacing = 2;
+
+        UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
+            withConfiguration:[UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleFootnote]]];
+        chevron.tintColor = [UIColor tertiaryLabelColor];
+        [chevron setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        UIView *spacer = [[UIView alloc] init];
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[leftStack, spacer, chevron]];
         row.spacing = 12;
-        row.alignment = UIStackViewAlignmentFirstBaseline;
+        row.alignment = UIStackViewAlignmentCenter;
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:56].active = YES;
         row.isAccessibilityElement = YES;
         row.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", item[0], item[1]];
         [self.historyRows addArrangedSubview:row];
+        if (i + 1 < items.count) [self.historyRows addArrangedSubview:[self hairlineInk:NO]];
     }
 }
 

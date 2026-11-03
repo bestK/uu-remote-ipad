@@ -42,7 +42,16 @@
 
 ## 面板 App
 
-主屏上的「UU 远程」是唯一的操作入口，原生设置页风格，跟随系统深色模式和字号，中英双语：
+主屏上的「UU 远程」是唯一的操作入口，中英双语，跟随系统深色模式和字号。界面采用 28pt 连续圆角卡片与底部居中悬浮胶囊栏：
+浅色模式下以暖石灰底配纯白卡片、荧光青柠状态胶囊与纯黑胶囊主按钮；深色模式下以纯碳黑底配电光蓝几何星芒状态主卡、石墨灰卡片与暗红退出胶囊。
+快捷键页左侧是动作、右侧是胶囊键帽，Windows / macOS 分段切换。
+
+- **连接**：运行状态主卡（设备名、状态胶囊、状态副行、最近一次连接摘要）、扫码登录、安装服务、圆形头像账号卡与连接记录。
+- **安全**：自动解锁密码（带状态胶囊与无边框胶囊输入框）与远程结束后锁屏。
+- **快捷键**：Windows / macOS 分段切换，另列底边鼠标手势。
+
+状态真正改变时整块状态主卡短暂溶解；“正在远控”时状态圆形徽章缓慢呼吸；减少动态效果下缩短或关闭转场。
+进入后台停止界面轮询，回到前台立即刷新。
 
 | 卡片 | 作用 |
 |---|---|
@@ -100,6 +109,19 @@ IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) 
   cargo build --release --target aarch64-apple-ios --bin uuremote-server
 ios/app/build.sh   # 面板 App + 带服务的 IPA（约 20 MB）
 ```
+
+面板界面的隔离检查（Apple Silicon Mac，Xcode）：
+
+```sh
+python3 "ios/app/tests/prepare-native-check.py" --run
+python3 "ios/app/tests/prepare-native-check.py" --language en --run
+```
+
+先以 iOS 15 arm64 编译链接，再使用同一视图的 UIKit/Mac Catalyst 检查程序验证状态、控件与布局。
+每个检查进程限时 60 秒，数据全部来自临时目录，不读取真实账号或密码，也不执行服务安装。
+中英各 98 项断言；结果和合成数据截图在 `.impeccable/review/`，不进入发布包。
+大字号仅覆盖环境类别，不能证明字体放大。
+iPad 的真实字号缩放、安全区、键盘、触摸、VoiceOver 与动态效果仍需模拟器或实机验收。
 
 ## 安装（iPad，root）
 

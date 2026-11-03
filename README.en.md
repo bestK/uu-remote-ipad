@@ -12,6 +12,7 @@
 > [below](#experimental-native-viewer-uuremote-viewer)).
 > A **jailbroken iPad** can be the controlled device too: the host runs on the iPad itself and the official
 > clients connect as usual (see [ios/README.md](ios/README.md)).
+> The iPad panel uses 28pt rounded cards and a floating bottom capsule switcher (Connect / Security / Shortcuts), with a lime status pill in Light Mode and an electric-blue asterisk hero card in Dark Mode; the host protocol is unchanged.
 > Desktop-less **Synology / NAS** boxes can run it in Docker: [deployment guide](docs/deploy-nas-docker.md#english), image
 > [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux).
 >
