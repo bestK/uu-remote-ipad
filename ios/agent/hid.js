@@ -154,8 +154,12 @@ rpc.exports = {
   },
   // Consumer-page buttons (page 0x0c): 0x40 Menu is the Home button of hardware keyboards, which
   // works on Face ID iPads where a synthesized home-indicator swipe is ignored outside the lock screen.
-  button: function (usage) {
-    postKey(usage, 1, 0x0c); Thread.sleep(0.05); postKey(usage, 0, 0x0c);
+  // Pressed twice it opens the app switcher, like a double click of a hardware Home button.
+  button: function (usage, times) {
+    for (let i = 0; i < (times || 1); i++) {
+      if (i) Thread.sleep(0.12);
+      postKey(usage, 1, 0x0c); Thread.sleep(0.04); postKey(usage, 0, 0x0c);
+    }
     return 'ok';
   },
   senders: function () {

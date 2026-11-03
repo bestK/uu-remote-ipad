@@ -412,7 +412,17 @@ impl InputInjector {
         // switches the input language), so the PC keyboard behaves like an iPad keyboard.
         #[cfg(target_os = "ios")]
         {
-            let key = if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) { key } else {
+            let mac = self.mac_controller.load(std::sync::atomic::Ordering::Relaxed);
+            // Win+Tab (Task View on Windows) opens the app switcher. Mac viewers have Cmd+Tab.
+            static WIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static SWITCHER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !mac && matches!(key, 0x5b | 0x5c) { WIN.store(is_press, std::sync::atomic::Ordering::Relaxed); }
+            if !mac && key == 0x09 && (is_press && WIN.load(std::sync::atomic::Ordering::Relaxed) || !is_press && SWITCHER.load(std::sync::atomic::Ordering::Relaxed)) {
+                SWITCHER.store(is_press, std::sync::atomic::Ordering::Relaxed);
+                if is_press && crate::ios_platform::app_switcher().is_err() { log::warn!("iPad app switcher injection failed"); }
+                return;
+            }
+            let key = if mac { key } else {
                 match key { 0x11 | 0xa2 => 0x5b, 0xa3 => 0x5c, 0x5b => 0xa2, 0x5c => 0xa3, other => other }
             };
             // Cmd+H (PC Ctrl+H) goes home like on iPadOS 14; the system shortcut is now Globe+H,
