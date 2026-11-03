@@ -168,7 +168,17 @@ pub fn set_host_muted(muted: bool) -> bool {
     quiet("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", flag]) || quiet("pactl", &["set-sink-mute", "@DEFAULT_SINK@", flag])
 }
 
-pub fn lock_session() -> bool { quiet("loginctl", &["lock-session"]) }
+pub fn lock_session() -> bool {
+    #[cfg(target_os = "ios")]
+    {
+        return crate::ios_platform::lock_screen().map(|()| true).unwrap_or_else(|error| {
+            log::warn!("iPad lock after remote session failed: {error}");
+            false
+        });
+    }
+    #[cfg(not(target_os = "ios"))]
+    quiet("loginctl", &["lock-session"])
+}
 
 /// The on/off value of a toggle action: SimpleAction.value (field 5), else args JSON/text; default on.
 pub fn toggle_value(value: Option<u64>, args: &[u8]) -> bool {
@@ -263,6 +273,8 @@ impl PeerActions {
         let mut state = state().lock().unwrap();
         state.desktop_sessions += 1;
         crate::privacy_screen::session_started();
+        #[cfg(target_os = "ios")]
+        crate::ios_platform::note_session_started();
         if state.desktop_sessions == 1 && state.settings.keep_mute {
             mute_for_session(&mut state);
             log::info!("Host muted for remote session (静音运行)");
@@ -276,10 +288,18 @@ impl PeerActions {
         let mut state = state().lock().unwrap();
         state.desktop_sessions = state.desktop_sessions.saturating_sub(1);
         crate::privacy_screen::session_ended();
+        #[cfg(target_os = "ios")]
+        crate::ios_platform::note_session_ended();
         if state.desktop_sessions > 0 { return; }
         crate::virtual_audio::disable();
         if !state.settings.mute_permanent { restore_mute(&mut state); }
-        if state.settings.auto_lock {
+        // The panel app's switch is the owner's local default; a viewer's SimpleAction 19 only
+        // applies when the panel has not set one.
+        #[cfg(target_os = "ios")]
+        let auto_lock = crate::ios_platform::panel_lock_after_session().unwrap_or(state.settings.auto_lock);
+        #[cfg(not(target_os = "ios"))]
+        let auto_lock = state.settings.auto_lock;
+        if auto_lock {
             log::info!("Auto lock after remote session: ok={}", lock_session());
         }
     }

@@ -170,6 +170,78 @@ pub fn unlock(passcode: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Files the panel app reads: the live status and the last sessions. Timestamps and counts only,
+/// never anything typed, copied or shown on the iPad.
+const STATUS_JSON: &str = "/private/var/tmp/uu-status.json";
+const HISTORY_JSONL: &str = "/private/var/tmp/uu-history.jsonl";
+const HISTORY_KEEP: usize = 20;
+
+static VIEWERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static SESSION_START: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static LAST_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn epoch() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn signed_in() -> bool {
+    crate::config::file().ok().flatten()
+        .and_then(|c| c.get("token").and_then(|t| t.as_str()).map(|t| !t.is_empty())).unwrap_or(false)
+}
+
+fn write_status() {
+    let status = serde_json::json!({
+        "signed_in": signed_in(),
+        "viewers": VIEWERS.load(std::sync::atomic::Ordering::Relaxed),
+        "last_session_end": LAST_END.load(std::sync::atomic::Ordering::Relaxed),
+        "updated": epoch(),
+    });
+    let _ = std::fs::write(STATUS_JSON, status.to_string());
+}
+
+/// A desktop session came up: count it and note when it started.
+pub fn note_session_started() {
+    VIEWERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut start) = SESSION_START.lock() { *start = Some(std::time::Instant::now()); }
+    write_status();
+}
+
+/// A desktop session ended: record its length for the panel's history.
+pub fn note_session_ended() {
+    VIEWERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let seconds = SESSION_START.lock().ok().and_then(|mut s| s.take()).map(|at| at.elapsed().as_secs()).unwrap_or(0);
+    let now = epoch();
+    LAST_END.store(now, std::sync::atomic::Ordering::Relaxed);
+    let line = serde_json::json!({ "at": now, "duration_s": seconds }).to_string();
+    let mut lines: Vec<String> = std::fs::read_to_string(HISTORY_JSONL).unwrap_or_default()
+        .lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+    lines.push(line);
+    if lines.len() > HISTORY_KEEP { lines.drain(..lines.len() - HISTORY_KEEP); }
+    let _ = std::fs::write(HISTORY_JSONL, lines.join("\n") + "\n");
+    write_status();
+}
+
+/// Keeps the status file fresh so the panel can tell a running host from a stopped one.
+pub fn start_status_writer() {
+    std::thread::Builder::new().name("uu-ios-status".into()).spawn(|| loop {
+        write_status();
+        std::thread::sleep(Duration::from_secs(3));
+    }).ok();
+}
+
+/// Panel app settings, owned by the person holding the iPad.
+const SETTINGS_PATH: &str = "/var/mobile/Library/UURemote/settings.json";
+
+/// `lock_after_session` from the panel app: the owner's local switch, which wins over whatever a
+/// viewer last sent with SimpleAction 19.
+pub fn panel_lock_after_session() -> Option<bool> {
+    let text = std::fs::read_to_string(SETTINGS_PATH).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?.get("lock_after_session")?.as_bool()
+}
+
+/// Locks the iPad: the lock screen appears and the panel goes dark.
+pub fn lock_screen() -> Result<(), String> { note_input(); with_screen(|s| s.call("lock", "[]")).map(|_| ()) }
+
 /// Lock-screen passcode saved by the panel app (owner mobile, 0600). Read only to unlock.
 const PASSCODE_PATH: &str = "/var/mobile/Library/UURemote/unlock.key";
 /// Last auto-unlock outcome, shown by the panel app.

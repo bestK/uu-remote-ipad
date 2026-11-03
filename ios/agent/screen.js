@@ -127,8 +127,14 @@ rpc.exports = {
       return String(b.screenIsOn());
     });
   },
+  // Locks the device (the owner asked for this after a remote session): lock the UI, then darken the
+  // panel. Requires the passcode to get back in, so the host only does it when told to.
   lock: function () {
     return onMain(function () {
+      try {
+        const l = ObjC.classes.SBLockScreenManager.sharedInstance();
+        if (l['- lockUIFromSource:withOptions:']) l.lockUIFromSource_withOptions_(1, ptr(0));
+      } catch (e) {}
       const b = ObjC.classes.SBBacklightController.sharedInstance();
       if (b['- setBacklightState:source:animated:completion:']) b.setBacklightState_source_animated_completion_(0, 0, true, ptr(0));
       return 'ok';

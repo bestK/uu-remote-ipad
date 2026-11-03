@@ -438,7 +438,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter_module("uuremote_server", log::LevelFilter::Info).init();
     } else { env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init(); }
     #[cfg(target_os = "ios")]
-    ios_platform::lift_memory_limit();
+    {
+        ios_platform::lift_memory_limit();
+        ios_platform::start_status_writer();
+    }
     // An unknown argument must never fall through to starting a second full host server.
     let arg1 = std::env::args().nth(1);
     let value_ok = match arg1.as_deref() {
