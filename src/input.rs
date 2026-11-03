@@ -407,36 +407,8 @@ impl InputInjector {
 
     pub fn windows_key_event(&self, key: i32, is_press: bool) {
         let _serial=self.serial.lock().unwrap();
-        // iPadOS shortcuts use Cmd. A Mac viewer sends Cmd as the Windows key, which already is Cmd here.
-        // A PC viewer's Ctrl becomes Cmd (Ctrl+C copies) and its Windows key takes Ctrl (Win+Space
-        // switches the input language), so the PC keyboard behaves like an iPad keyboard.
         #[cfg(target_os = "ios")]
-        {
-            let mac = self.mac_controller.load(std::sync::atomic::Ordering::Relaxed);
-            // Win+Tab (Task View on Windows) opens the app switcher. Mac viewers have Cmd+Tab.
-            static WIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            static SWITCHER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !mac && matches!(key, 0x5b | 0x5c) { WIN.store(is_press, std::sync::atomic::Ordering::Relaxed); }
-            if !mac && key == 0x09 && (is_press && WIN.load(std::sync::atomic::Ordering::Relaxed) || !is_press && SWITCHER.load(std::sync::atomic::Ordering::Relaxed)) {
-                SWITCHER.store(is_press, std::sync::atomic::Ordering::Relaxed);
-                if is_press && crate::ios_platform::app_switcher().is_err() { log::warn!("iPad app switcher injection failed"); }
-                return;
-            }
-            let key = if mac { key } else {
-                match key { 0x11 | 0xa2 => 0x5b, 0xa3 => 0x5c, 0x5b => 0xa2, 0x5c => 0xa3, other => other }
-            };
-            // Cmd+H (PC Ctrl+H) goes home like on iPadOS 14; the system shortcut is now Globe+H,
-            // which no PC keyboard has.
-            static CMD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            static HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if matches!(key, 0x5b | 0x5c) { CMD.store(is_press, std::sync::atomic::Ordering::Relaxed); }
-            if key == 0x48 && (is_press && CMD.load(std::sync::atomic::Ordering::Relaxed) || !is_press && HOME.load(std::sync::atomic::Ordering::Relaxed)) {
-                HOME.store(is_press, std::sync::atomic::Ordering::Relaxed);
-                if is_press && crate::ios_platform::home_button().is_err() { log::warn!("iPad Home button injection failed"); }
-                return;
-            }
-            return self.key_symbol_event(key, is_press);
-        }
+        return self.ios_key_event(key, is_press);
         #[allow(unreachable_code)]
         if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) && self.mac_cmd(key, is_press) { return; }
         if self.terminal_shift(key, is_press) {
@@ -450,6 +422,65 @@ impl InputInjector {
             }
             return;
         }
+        self.key_symbol_event(key, is_press);
+    }
+
+    /// iPad keyboard. iPadOS shortcuts use Cmd: a Mac viewer sends Cmd as the Windows key, which already
+    /// is Cmd here; a PC viewer's Ctrl becomes Cmd (Ctrl+C copies) and its Windows key takes Ctrl
+    /// (Win+Space switches the input language). Switching follows the viewer's own desktop:
+    /// PC Alt+Tab / Win+Tab / Win+D, Mac Cmd+Tab / Ctrl+Up / Cmd+H, plus Ctrl+H on a PC. iPadOS has
+    /// no Cmd+H home shortcut since 15 (it is Globe+H), so home and the app switcher press the
+    /// keyboard Home button once and twice.
+    #[cfg(target_os = "ios")]
+    fn ios_key_event(&self, key: i32, is_press: bool) {
+        #[derive(Clone, Copy)]
+        enum Action { Home, Switcher }
+        struct Keys { win: bool, alt: bool, ctrl: bool, alt_tab: bool, swallowed: std::collections::BTreeSet<i32> }
+        static KEYS: std::sync::Mutex<Keys> = std::sync::Mutex::new(Keys { win: false, alt: false, ctrl: false, alt_tab: false,
+            swallowed: std::collections::BTreeSet::new() });
+        const CMD: i32 = 0x5b; const OPTION_L: i32 = 0xa4; const OPTION_R: i32 = 0xa5;
+        let mac = self.mac_controller.load(std::sync::atomic::Ordering::Relaxed);
+        let is_alt = matches!(key, 0x12 | OPTION_L | OPTION_R);
+        let mut keys = KEYS.lock().unwrap();
+        match key { 0x5b | 0x5c => keys.win = is_press, 0x11 | 0xa2 | 0xa3 => keys.ctrl = is_press, _ if is_alt => keys.alt = is_press, _ => {} }
+        // A shortcut key's autorepeat and release belong to the shortcut, not to the iPad.
+        if keys.swallowed.contains(&key) {
+            if !is_press { keys.swallowed.remove(&key); }
+            return;
+        }
+        // PC Alt+Tab is iPad Cmd+Tab: Option is lifted and Cmd held until Alt is released, so Tab can be
+        // pressed again to step through the apps.
+        if !mac && keys.alt_tab && is_alt {
+            if !is_press { keys.alt_tab = false; drop(keys); self.key_symbol_event(CMD, false); }
+            return;
+        }
+        if !mac && key == 0x09 && is_press && keys.alt && !keys.win && !keys.alt_tab {
+            keys.alt_tab = true;
+            drop(keys);
+            log::info!("iPad shortcut: Alt+Tab as Cmd+Tab");
+            self.key_symbol_event(OPTION_L, false); self.key_symbol_event(OPTION_R, false);
+            self.key_symbol_event(CMD, true);
+            return self.key_symbol_event(key, true);
+        }
+        let action = if !is_press { None } else { match key {
+            0x44 if !mac && keys.win => Some(Action::Home),                     // Win+D
+            0x09 if !mac && keys.win => Some(Action::Switcher),                 // Win+Tab
+            0x26 if mac && keys.ctrl => Some(Action::Switcher),                 // Ctrl+Up (Mission Control)
+            0x48 if (mac && keys.win) || (!mac && keys.ctrl) => Some(Action::Home), // Cmd+H / Ctrl+H
+            _ => None,
+        } };
+        if let Some(action) = action {
+            keys.swallowed.insert(key);
+            drop(keys);
+            log::info!("iPad shortcut: {}", match action { Action::Home => "home", Action::Switcher => "app switcher" });
+            let result = match action { Action::Home => crate::ios_platform::home_button(), Action::Switcher => crate::ios_platform::app_switcher() };
+            if result.is_err() { log::warn!("iPad shortcut injection failed"); }
+            return;
+        }
+        drop(keys);
+        let key = if mac { key } else {
+            match key { 0x11 | 0xa2 => CMD, 0xa3 => 0x5c, 0x5b => 0xa2, 0x5c => 0xa3, other => other }
+        };
         self.key_symbol_event(key, is_press);
     }
 
