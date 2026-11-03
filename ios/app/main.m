@@ -13,12 +13,13 @@ static NSString *const kPasscodeDir = @"/var/mobile/Library/UURemote";
 static NSString *const kPasscodePath = @"/var/mobile/Library/UURemote/unlock.key";
 static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
 
-@interface PanelController : UIViewController
+@interface PanelController : UIViewController <UITextFieldDelegate>
 @property(nonatomic) UIImageView *qrView;
 @property(nonatomic) UILabel *statusLabel;
 @property(nonatomic) UILabel *hintLabel;
 @property(nonatomic) NSTimer *timer;
 @property(nonatomic) UITextField *passcodeField;
+@property(nonatomic) NSMutableString *passcode;
 @property(nonatomic) UILabel *unlockLabel;
 @end
 
@@ -72,9 +73,13 @@ static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
 
     self.passcodeField = [[UITextField alloc] init];
     self.passcodeField.placeholder = @"iPad 锁屏密码";
-    self.passcodeField.secureTextEntry = YES;
+    // Masked by hand: with secureTextEntry iOS hides the keyboard from screen capture, so a remote
+    // viewer would see a grey box instead of the keys.
+    self.passcode = [NSMutableString string];
+    self.passcodeField.delegate = self;
     self.passcodeField.keyboardType = UIKeyboardTypeASCIICapable;
     self.passcodeField.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.passcodeField.spellCheckingType = UITextSpellCheckingTypeNo; // keep it out of keyboard learning
     self.passcodeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.passcodeField.textContentType = UITextContentTypeOneTimeCode; // keep it out of AutoFill/Keychain prompts
     self.passcodeField.borderStyle = UITextBorderStyleRoundedRect;
@@ -144,8 +149,26 @@ static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
     self.timer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
 }
 
+- (BOOL)textField:(UITextField *)field shouldChangeCharactersInRange:(NSRange)range replacementString:(NSString *)text {
+    if (NSMaxRange(range) > self.passcode.length) range = NSMakeRange(self.passcode.length, 0);
+    [self.passcode replaceCharactersInRange:range withString:text];
+    field.text = [@"" stringByPaddingToLength:self.passcode.length withString:@"\u2022" startingAtIndex:0];
+    return NO;
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)field {
+    [self savePasscode];
+    return NO;
+}
+
+- (void)resetPasscodeField {
+    [self.passcode setString:@""];
+    self.passcodeField.text = @"";
+    [self.passcodeField resignFirstResponder];
+}
+
 - (void)savePasscode {
-    NSString *code = self.passcodeField.text ?: @"";
+    NSString *code = [self.passcode copy];
     if (code.length == 0) { self.unlockLabel.text = @"请先输入锁屏密码。"; return; }
     [[NSFileManager defaultManager] createDirectoryAtPath:kPasscodeDir withIntermediateDirectories:YES
         attributes:@{NSFilePosixPermissions: @0700} error:nil];
@@ -154,8 +177,7 @@ static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
     NSData *data = [code dataUsingEncoding:NSUTF8StringEncoding];
     BOOL ok = fd >= 0 && fchmod(fd, 0600) == 0 && write(fd, data.bytes, data.length) == (ssize_t)data.length;
     if (fd >= 0) close(fd);
-    self.passcodeField.text = @"";
-    [self.passcodeField resignFirstResponder];
+    [self resetPasscodeField];
     if (!ok) { self.unlockLabel.text = @"保存失败，请重试。"; return; }
     [[NSFileManager defaultManager] removeItemAtPath:kUnlockStatusPath error:nil];
     [self refreshUnlock];
@@ -164,8 +186,7 @@ static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
 - (void)clearPasscode {
     [[NSFileManager defaultManager] removeItemAtPath:kPasscodePath error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:kUnlockStatusPath error:nil];
-    self.passcodeField.text = @"";
-    [self.passcodeField resignFirstResponder];
+    [self resetPasscodeField];
     [self refreshUnlock];
 }
 

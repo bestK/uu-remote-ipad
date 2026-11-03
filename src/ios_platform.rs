@@ -229,6 +229,40 @@ pub fn swipe(x1: f64, y1: f64, x2: f64, y2: f64, ms: u32) -> Result<(), String> 
 }
 pub fn home() -> Result<(), String> { with_hid(|s| s.call("home", "[]")).map(|_| ()) }
 
+/// The home-indicator gesture only starts in the bottom ~1.5% of the panel, which a viewer's mouse
+/// rarely hits. A press in the bottom band is held back: dragged upward it becomes a touch starting
+/// at the very edge (home / app switcher); released in place it is a plain tap where it was pressed.
+const BOTTOM_BAND: f64 = 0.96;
+const EDGE_Y: f64 = 0.995;
+static BOTTOM_PRESS: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+pub fn pointer_down(x: f64, y: f64) -> Result<(), String> {
+    if y >= BOTTOM_BAND {
+        note_input();
+        if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = Some((x, y)); }
+        return Ok(());
+    }
+    down(x, y)
+}
+
+pub fn pointer_move(x: f64, y: f64) -> Result<(), String> {
+    let pending = BOTTOM_PRESS.lock().ok().and_then(|p| *p);
+    if let Some((sx, sy)) = pending {
+        if y > sy - 0.01 { return Ok(()); } // not an upward drag yet
+        if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = None; }
+        down(sx, EDGE_Y)?;
+    }
+    move_to(x, y)
+}
+
+pub fn pointer_up(x: f64, y: f64) -> Result<(), String> {
+    let pending = BOTTOM_PRESS.lock().ok().and_then(|mut p| p.take());
+    match pending {
+        Some((sx, sy)) => tap(sx, sy),
+        None => up(x, y),
+    }
+}
+
 /// USB HID keyboard usage (page 0x07) for an X11 keysym.
 pub fn keysym_usage(symbol: u64) -> Option<u32> {
     let usage = match symbol {

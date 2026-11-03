@@ -533,7 +533,7 @@ impl InputInjector {
                 let (px,py) = (px.clamp(0.0,1.0), py.clamp(0.0,1.0));
                 crate::ios_platform::set_position(px,py);
                 if !self.held.lock().unwrap().buttons.is_empty() {
-                    return match crate::ios_platform::move_to(px,py) { Ok(()) => 0, Err(_) => -1 };
+                    return match crate::ios_platform::pointer_move(px,py) { Ok(()) => 0, Err(_) => -1 };
                 }
                 return 0;
             }
@@ -615,8 +615,8 @@ impl InputInjector {
                 crate::ios_platform::swipe(x,y,tx,ty,120)
             };
             let result = match (button, pressed) {
-                (1, true) => crate::ios_platform::down(x,y),
-                (1, false) => crate::ios_platform::up(x,y),
+                (1, true) => crate::ios_platform::pointer_down(x,y),
+                (1, false) => crate::ios_platform::pointer_up(x,y),
                 (4, true) => flick(0.0, 0.18),
                 (5, true) => flick(0.0,-0.18),
                 (6, true) => flick(-0.18, 0.0),
