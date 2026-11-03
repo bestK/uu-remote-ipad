@@ -407,6 +407,17 @@ impl InputInjector {
 
     pub fn windows_key_event(&self, key: i32, is_press: bool) {
         let _serial=self.serial.lock().unwrap();
+        // iPadOS shortcuts use Cmd. A Mac viewer sends Cmd as the Windows key, which already is Cmd here.
+        // A PC viewer's Ctrl becomes Cmd (Ctrl+C copies) and its Windows key takes Ctrl (Win+Space
+        // switches the input language), so the PC keyboard behaves like an iPad keyboard.
+        #[cfg(target_os = "ios")]
+        {
+            let key = if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) { key } else {
+                match key { 0x11 | 0xa2 => 0x5b, 0xa3 => 0x5c, 0x5b => 0xa2, 0x5c => 0xa3, other => other }
+            };
+            return self.key_symbol_event(key, is_press);
+        }
+        #[allow(unreachable_code)]
         if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) && self.mac_cmd(key, is_press) { return; }
         if self.terminal_shift(key, is_press) {
             const SHIFT_L: u64 = 0xffe1;
@@ -432,7 +443,7 @@ impl InputInjector {
             // KP_0..KP_9 type digits only with NumLock on (#46); record the server's NumLock state, not the key.
             static NUMPAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             if (0x60..=0x6f).contains(&key) && is_press && self.backend==crate::desktop_backend::DesktopBackend::X11
-                && NUMPAD.fetch_add(1,std::sync::atomic::Ordering::Relaxed) < 4 {
+                && !cfg!(target_os = "ios") && NUMPAD.fetch_add(1,std::sync::atomic::Ordering::Relaxed) < 4 {
                 let (mut x,mut y,mut mask)=(0,0,0u32);
                 let state=unsafe { x11_pointer_state(&mut x,&mut y,&mut mask) };
                 log::info!("Desktop numpad key: result={result} numlock={}", state==0 && mask & 0x10 != 0);
@@ -449,6 +460,10 @@ impl InputInjector {
         self.discard_pointer();
         { let mut touch=self.touch.lock().unwrap(); self.lift_finger(&mut touch); }
         let mut held=self.held.lock().unwrap();
+        #[cfg(target_os = "ios")]
+        for symbol in held.keys.iter() {
+            if let Some(usage)=crate::ios_platform::keysym_usage(*symbol) { let _=crate::ios_platform::key(usage,false); }
+        }
         if let Some(uinput)=&self.uinput {
             Self::uinput_result(uinput.release_all());
         } else if self.backend==crate::desktop_backend::DesktopBackend::X11 {
@@ -504,6 +519,27 @@ impl InputInjector {
         }
     }
     fn inject_move(&self,x:i32,y:i32,relative:bool)->i32 {
+        // iPad has no pointer: keep the position for the next tap and only drag while a button is held.
+        #[cfg(target_os = "ios")]
+        {
+            let (w,h) = *self.screen.lock().unwrap();
+            if w > 1 && h > 1 {
+                let (px,py) = if relative {
+                    let (px,py) = crate::ios_platform::position();
+                    (px + f64::from(x)/f64::from(w), py + f64::from(y)/f64::from(h))
+                } else {
+                    (f64::from(x)/f64::from(w), f64::from(y)/f64::from(h))
+                };
+                let (px,py) = (px.clamp(0.0,1.0), py.clamp(0.0,1.0));
+                crate::ios_platform::set_position(px,py);
+                if !self.held.lock().unwrap().buttons.is_empty() {
+                    return match crate::ios_platform::move_to(px,py) { Ok(()) => 0, Err(_) => -1 };
+                }
+                return 0;
+            }
+            return -1;
+        }
+        #[cfg(not(target_os = "ios"))]
         if self.uinput_pointer && self.backend != crate::desktop_backend::DesktopBackend::X11 {
             if let Some(uinput) = &self.uinput {
                 if relative { return Self::uinput_result(uinput.move_relative(x,y)); }
@@ -570,6 +606,28 @@ impl InputInjector {
         self.uinput.is_some() && self.portal.lock().unwrap().as_ref().is_some_and(|p| p.is_virtual())
     }
     fn inject_button(&self,button:i32,pressed:bool)->i32 {
+        #[cfg(target_os = "ios")]
+        {
+            let (x,y) = crate::ios_platform::position();
+            // Wheel buttons arrive as press+release pairs; each press is one short flick.
+            let flick = |dx: f64, dy: f64| -> Result<(), String> {
+                let (tx,ty) = ((x+dx).clamp(0.02,0.98), (y+dy).clamp(0.02,0.98));
+                crate::ios_platform::swipe(x,y,tx,ty,120)
+            };
+            let result = match (button, pressed) {
+                (1, true) => crate::ios_platform::down(x,y),
+                (1, false) => crate::ios_platform::up(x,y),
+                (4, true) => flick(0.0, 0.18),
+                (5, true) => flick(0.0,-0.18),
+                (6, true) => flick(-0.18, 0.0),
+                (7, true) => flick(0.18, 0.0),
+                // Secondary buttons have no touch equivalent; a tap is the closest safe action.
+                (_, true) => crate::ios_platform::tap(x,y),
+                (_, false) => Ok(()),
+            };
+            return match result { Ok(()) => 0, Err(_) => -1 };
+        }
+        #[cfg(not(target_os = "ios"))]
         // Portal: clicks follow absolute motion on the same session, so a tap cannot land
         // before the compositor has moved the pointer there (uinput is a separate queue).
         if !self.uinput_pointer && self.backend==crate::desktop_backend::DesktopBackend::Portal && !self.virtual_uinput() {
@@ -586,6 +644,12 @@ impl InputInjector {
         else { unsafe { x11_mouse_button(button,i32::from(pressed)) } }
     }
     fn inject_key(&self,symbol:u64,pressed:bool)->i32 {
+        #[cfg(target_os = "ios")]
+        {
+            let Some(usage) = crate::ios_platform::keysym_usage(symbol) else { return -1 };
+            return match crate::ios_platform::key(usage, pressed) { Ok(()) => 0, Err(_) => -1 };
+        }
+        #[cfg(not(target_os = "ios"))]
         if let Some(uinput)=&self.uinput {
             if let Some(code)=crate::uinput::keysym_to_evdev(symbol) { return Self::uinput_result(uinput.key(code,pressed)); }
         }
@@ -721,6 +785,14 @@ impl InputInjector {
     /// via clipboard paste (Shift+Insert). Set UU_WAYLAND_TEXT=0 to disable Wayland text injection.
     pub fn text_input(&self, text: &str) {
         let _serial=self.serial.lock().unwrap();
+        #[cfg(target_os = "ios")]
+        {
+            match crate::ios_platform::type_text(text) {
+                Ok(()) => log::info!("Desktop text input: chars={}", text.chars().count()),
+                Err(error) => log::warn!("Desktop text input failed: {error}"),
+            }
+            return;
+        }
         if self.backend != crate::desktop_backend::DesktopBackend::X11 {
             if std::env::var("UU_WAYLAND_TEXT").is_ok_and(|v| v == "0") { return; }
             let typed = self.type_uinput_text(text);

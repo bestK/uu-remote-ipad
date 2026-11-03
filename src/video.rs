@@ -374,6 +374,8 @@ pub async fn ffmpeg_encoders() -> Option<Vec<&'static str>> {
 /// Installing FFmpeg clears the window line on the next check; no restart is needed.
 pub fn check_ffmpeg_usable() {
     if crate::desktop_backend::headless() { return; }
+    // The iPad encodes in process with VideoToolbox and has no FFmpeg.
+    if cfg!(target_os = "ios") { return; }
     #[cfg(feature = "inproc-av")]
     if native_engine_eligible(crate::video_select::selection().encoder, NativeDisplayKind::Portal)
         && native_display_kind() == NativeDisplayKind::Portal { return; }
@@ -595,6 +597,18 @@ pub async fn run_auto_probe() -> crate::video_select::ProbeReport {
 }
 
 pub async fn hevc_available(requested: Encoder) -> bool {
+    // The iPad encodes with VideoToolbox, not FFmpeg: ask it for an HEVC session once.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = requested;
+        static IOS_HEVC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return *IOS_HEVC.get_or_init(|| {
+            let ok = crate::ios_video::Encoder::new(256, 256, 30, 30, 1_000, true).is_ok();
+            log::info!("HEVC encoder probe: {}", if ok { "videotoolbox ok" } else { "unavailable" });
+            ok
+        });
+    }
+    #[allow(unreachable_code)]
     let spec = ffmpeg_spec();
     let cell = hevc_cell(hevc_cache(), &spec, requested);
     *cell.get_or_init(|| probe_hevc(spec, requested)).await
@@ -719,7 +733,7 @@ async fn read_encoder(
 /// A resized X11 root fails every encoder alike (x11grab BadMatch on the old size);
 /// returns the new size so the stream restarts capture instead of walking the fallback chain.
 fn x11_resized(display: &str, portal: bool, size: (u32, u32)) -> Option<(u32, u32)> {
-    if portal || display.starts_with("wayland:") || display.starts_with("kms:") { return None; }
+    if portal || display.starts_with("wayland:") || display.starts_with("kms:") || display.starts_with("ios:") { return None; }
     crate::capture::x11_size().filter(|current| *current != size)
 }
 
@@ -819,6 +833,13 @@ async fn read_encoder_with(
     settings: VideoSettings, #[cfg_attr(not(feature = "inproc-av"), allow(unused_variables))] idr: Arc<AtomicBool>, budget: Arc<Semaphore>,
     selection: crate::video_select::Selection,
 )->Result<(),String>{
+    // iPad: SpringBoard JPEG -> VideoToolbox, no FFmpeg process exists on iOS.
+    #[cfg(target_os = "ios")]
+    if display.starts_with("ios:") {
+        log::info!("Desktop encoder: display={} source={}x{} fps={} codec={:?} maxrate={}k pipeline=videotoolbox",
+            display, size.0, size.1, u32::from(settings.fps), settings.codec, settings.max_kbps().unwrap_or(20_000));
+        return read_ios(size, latest, sequence, settings, idr, (settings.source_id, settings.source_generation)).await;
+    }
     let selected_output=crate::wayland::capture_source(&display,portal.is_some(),settings.source_id);
     // Portal frames come from the session's current monitor, whatever the advertised mode says.
     let size=portal.as_ref().map(|p|p.size()).or(selected_output.map(|s|(s.width,s.height))).unwrap_or(size);
@@ -998,6 +1019,96 @@ async fn read_encoder_with(
         }
         if pending.len() > MAX_ACCESS_UNIT { return Err("Encoder access unit exceeds limit".into()); }
     }
+}
+
+/// iPad: capture (SpringBoard, frida RPC) and encode (VideoToolbox) run on separate threads;
+/// each costs ~25-30 ms per frame at half panel size, so pipelining is what reaches ~30 fps.
+#[cfg(target_os = "ios")]
+async fn read_ios(
+    size: (u32, u32), latest: mpsc::Sender<Arc<CompleteFrame>>, sequence: Arc<std::sync::atomic::AtomicU64>,
+    settings: VideoSettings, idr: Arc<AtomicBool>, source: (usize, u64),
+) -> Result<(), String> {
+    let fps = u32::from(settings.fps).max(1);
+    let (units_tx, mut units) = mpsc::channel::<crate::ios_video::Au>(4);
+    let stop = Arc::new(AtomicBool::new(false));
+    // Encode at most 1600 px wide: the native panel's JPEG decode dominates the frame budget.
+    let (out_w, out_h) = if size.0 > 1600 { (size.0 / 2, size.1 / 2) } else { size };
+    let (jpeg_tx, jpeg_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+
+    let capture_stop = stop.clone();
+    let capture = tokio::task::spawn_blocking(move || {
+        let interval = Duration::from_micros(1_000_000 / u64::from(fps));
+        // A persistent failure would otherwise log every 200 ms: report changes and a 30 s summary.
+        let (mut last_error, mut repeats, mut reported) = (String::new(), 0u32, Instant::now());
+        // A dark panel still yields its last frame, so the viewer would watch a frozen picture:
+        // identical JPEGs for seconds mark the picture stale.
+        let mut wake_checked: Option<Instant> = None;
+        let (mut last_digest, mut same_since) = (0u64, Instant::now());
+        while !capture_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let started = Instant::now();
+            if wake_checked.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
+                crate::ios_platform::wake_display(same_since.elapsed() >= Duration::from_secs(4));
+                crate::ios_platform::auto_unlock();
+                wake_checked = Some(Instant::now());
+            }
+            match crate::ios_platform::capture_jpeg(0.55) {
+                Ok(jpeg) => {
+                    if !last_error.is_empty() { log::info!("iPad capture recovered after {} failures", repeats + 1); last_error.clear(); repeats = 0; }
+                    let digest = { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); jpeg.hash(&mut h); h.finish() };
+                    if digest != last_digest { (last_digest, same_since) = (digest, Instant::now()); }
+                    if jpeg_tx.send(jpeg).is_err() { return; }
+                }
+                Err(error) => {
+                    if error != last_error {
+                        log::warn!("iPad capture: {error}");
+                        (last_error, repeats, reported) = (error, 0, Instant::now());
+                    } else {
+                        repeats += 1;
+                        if reported.elapsed() >= Duration::from_secs(30) { log::warn!("iPad capture still failing ({repeats} repeats): {last_error}"); reported = Instant::now(); }
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            if let Some(rest) = interval.checked_sub(started.elapsed()) { std::thread::sleep(rest); }
+        }
+    });
+
+    let encode_stop = stop.clone();
+    let hevc = settings.codec == VideoCodec::H265;
+    let max_kbps = settings.max_kbps().unwrap_or(20_000);
+    let gop = gop_frames(settings.fps, true) as u32;
+    let encode = tokio::task::spawn_blocking(move || {
+        let mut encoder = crate::ios_video::Encoder::new(out_w, out_h, fps, gop, max_kbps, hevc)?;
+        while !encode_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let jpeg = match jpeg_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(jpeg) => jpeg,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            if idr.swap(false, std::sync::atomic::Ordering::Relaxed) { encoder.force_keyframe(); }
+            match encoder.encode(&jpeg) {
+                Ok(encoded) => for unit in encoded {
+                    if units_tx.blocking_send(unit).is_err() { return Ok::<(), String>(()); }
+                },
+                Err(error) => { log::warn!("iPad encode: {error}"); std::thread::sleep(Duration::from_millis(100)); }
+            }
+        }
+        Ok(())
+    });
+
+    let mut gate = DependencyGate::default();
+    while let Some(unit) = units.recv().await {
+        let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        gate.submit(&latest, Arc::new(CompleteFrame {
+            source_generation: source.1, source_id: source.0, codec: settings.codec, sequence,
+            completed_at: Instant::now(), data: unit.data, _permit: None,
+        }));
+        if latest.is_closed() { break; }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(units);
+    let _ = capture.await;
+    encode.await.map_err(|e| format!("iPad encoder task: {e}"))?
 }
 
 fn wayland_capture_command(executable:&std::path::Path,fps:u32)->Command {

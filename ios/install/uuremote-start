@@ -1,0 +1,11 @@
+#!/bin/sh
+# frida-server is the injection channel into SpringBoard/backboardd.
+if ! /var/jb/usr/bin/killall -0 frida-server 2>/dev/null; then
+    /var/jb/usr/sbin/frida-server >/var/jb/var/log/frida-server.log 2>&1 &
+    i=0
+    while [ $i -lt 50 ]; do
+        /var/jb/usr/bin/killall -0 frida-server 2>/dev/null && break
+        i=$((i+1)); sleep 0.2
+    done
+fi
+exec /var/jb/usr/local/bin/uuremote-server

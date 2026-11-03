@@ -15,6 +15,10 @@ name = "uuremote-server"
 path = "src/main.rs"
 
 [[bin]]
+name = "ipad-probe"
+path = "src/ipad_probe.rs"
+
+[[bin]]
 name = "uuremote-viewer"
 path = "src/viewer_main.rs"
 required-features = ["native-viewer"]
@@ -40,7 +44,7 @@ tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "blocking"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
@@ -70,6 +74,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 cc = "1.0"
 
 [patch.crates-io]
+libc = { path = "vendor/libc-0.2.190" }
 # RTP rollover counter survives delayed NACK retransmissions (vendor/webrtc-srtp/PATCHES.md).
 webrtc-srtp = { path = "vendor/webrtc-srtp" }
 webrtc-dtls = { path = "vendor/webrtc-dtls" }

@@ -33,6 +33,7 @@ fn machine_guid() -> String {
 }
 
 fn os_name() -> String {
+    if cfg!(target_os = "ios") { return "iPadOS".into(); }
     read("/etc/os-release").lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim_matches('"').to_string())
         .unwrap_or_else(|| "Linux".into())
 }
@@ -98,7 +99,14 @@ fn screen() -> String {
 
 fn hostname() -> String {
     let h = read("/proc/sys/kernel/hostname");
-    if h.is_empty() { "Linux".into() } else { h }
+    if !h.is_empty() { return h; }
+    // No procfs (the iPad host): the kernel hostname is the name set in Settings > General > About.
+    let mut buf = [0u8; 256];
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
+        let name = String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]).trim().to_string();
+        if !name.is_empty() { return name; }
+    }
+    "Linux".into()
 }
 
 /// csrf claim inside the JWT access token.

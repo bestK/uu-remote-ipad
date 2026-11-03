@@ -41,7 +41,12 @@ fn display_session() -> Option<String> {
     loginctl(&["show-user", &uid, "-p", "Display", "--value"])
 }
 
-pub fn locked_now() -> Option<bool> { display_session().as_deref().and_then(session_locked) }
+pub fn locked_now() -> Option<bool> {
+    #[cfg(target_os = "ios")]
+    { return crate::ios_platform::locked(); }
+    #[cfg(not(target_os = "ios"))]
+    display_session().as_deref().and_then(session_locked)
+}
 
 fn session_locked(session: &str) -> Option<bool> {
     loginctl(&["show-session", session, "-p", "LockedHint", "--value"]).map(|v| v == "yes")
@@ -73,6 +78,10 @@ fn pam_check(user: &str, password: &str) -> i32 {
 fn pam_check(_user: &str, _password: &str) -> i32 { -1 }
 
 /// Auto unlock is offered when there is a graphical logind session and PAM can be loaded.
+#[cfg(target_os = "ios")]
+pub fn supported() -> bool { true }
+
+#[cfg(not(target_os = "ios"))]
 pub fn supported() -> bool {
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| pam_available() && display_session().is_some())
@@ -85,10 +94,15 @@ pub fn watch_locked() -> watch::Receiver<Option<bool>> {
         let (tx, _) = watch::channel(None);
         let sender = tx.clone();
         std::thread::Builder::new().name("uu-lock-state".into()).spawn(move || {
-            let mut session = None;
+            let mut session: Option<String> = None;
             loop {
-                if session.is_none() { session = display_session(); }
-                let locked = session.as_deref().and_then(session_locked);
+                #[cfg(target_os = "ios")]
+                let locked = crate::ios_platform::locked();
+                #[cfg(not(target_os = "ios"))]
+                let locked = {
+                    if session.is_none() { session = display_session(); }
+                    session.as_deref().and_then(session_locked)
+                };
                 if locked.is_none() { session = None; } // session ended or changed: look it up again
                 sender.send_if_modified(|current| if *current != locked {
                     log::info!("Desktop lock state: {}", match locked { Some(true) => "locked", Some(false) => "unlocked", None => "unknown" });
@@ -111,6 +125,18 @@ pub fn unlock(password: String) -> UnlockResult {
     result
 }
 
+#[cfg(target_os = "ios")]
+fn unlock_with(password: &str) -> UnlockResult {
+    if crate::ios_platform::locked() == Some(false) { return UnlockResult::Success; }
+    if password.is_empty() { return UnlockResult::WrongPassword; }
+    match crate::ios_platform::unlock(password) {
+        Ok(true) => UnlockResult::Success,
+        Ok(false) => UnlockResult::WrongPassword,
+        Err(_) => UnlockResult::Failed,
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
 fn unlock_with(password: &str) -> UnlockResult {
     let Some(session) = display_session() else { return UnlockResult::NoLoggedInUser };
     if session_locked(&session) == Some(false) { return UnlockResult::Success; }

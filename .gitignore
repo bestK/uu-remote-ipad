@@ -6,3 +6,13 @@ target/
 /docs/validation/
 /docs/ACTIVE_HANDOFF.md
 /contrib/tests/
+
+# iPad host: frida devkit (ios/frida/fetch-devkit.sh) and device build outputs
+/ios/frida/*
+!/ios/frida/fetch-devkit.sh
+!/ios/frida/test.c
+/ios/app/build/
+/ios/probe/client
+/ios/probe/probe
+/ios/tweak/*.dylib
+/ios/app/.ldid.entitlements.plist

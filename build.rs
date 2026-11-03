@@ -21,6 +21,29 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(uu_gtk)");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "ios" {
+        cc::Build::new()
+            .file("c_engine/frida_bridge.c")
+            .include("ios/frida")
+            .warnings(false)
+            .compile("uu_frida_bridge");
+        // VideoToolbox encoder: JPEG from SpringBoard -> Annex-B access units.
+        cc::Build::new()
+            .file("c_engine/ios_video.m")
+            .flag("-fobjc-arc")
+            .warnings(false)
+            .compile("uu_ios_video");
+        println!("cargo:rustc-link-search=native=ios/frida");
+        println!("cargo:rustc-link-lib=static=frida-core");
+        println!("cargo:rustc-link-lib=dylib=resolv");
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=bsm");
+        for framework in ["Foundation", "CoreFoundation", "CoreGraphics", "UIKit", "CoreMedia", "CoreVideo", "VideoToolbox", "ImageIO"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rerun-if-changed=c_engine/frida_bridge.c");
+        println!("cargo:rerun-if-changed=c_engine/ios_video.m");
+    }
     if target_os == "linux" {
         if std::env::var_os("CARGO_FEATURE_KMS").is_some() {
             println!("cargo:rerun-if-changed=c_engine/kms_engine.c");

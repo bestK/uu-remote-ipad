@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.uuremote.host</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/var/jb/usr/local/bin/uuremote-server</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUST_LOG</key><string>info</string>
+    <key>HOME</key><string>/var/root</string>
+    <key>UU_FRIDA_ADDR</key><string>127.0.0.1:27042</string>
+    <key>UU_DESKTOP_BACKEND</key><string>x11</string>
+    <key>UU_AUDIO</key><string>0</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>JetsamProperties</key>
+  <dict>
+    <key>JetsamPriority</key><integer>12</integer>
+    <key>JetsamMemoryLimit</key><integer>1024</integer>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/var/jb/var/log/uuremote.log</string>
+  <key>StandardErrorPath</key><string>/var/jb/var/log/uuremote.log</string>
+</dict>
+</plist>

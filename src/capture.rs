@@ -89,6 +89,15 @@ impl ScreenCapture {
             portal: Some(session), kms: None, buffer: Mutex::new(Vec::new()) })
     }
     pub fn new() -> Result<Self, String> {
+        // iPad: SpringBoard's screen surface is the "desktop" (frida-core agent).
+        #[cfg(target_os = "ios")]
+        {
+            let info = crate::ios_platform::info()?;
+            log::info!("ScreenCapture initialized (iPad): {}x{}", info.width, info.height);
+            return Ok(Self { backend: crate::desktop_backend::DesktopBackend::X11, init_error: None,
+                portal: None, kms: None, display: "ios:frida".into(), width: info.width, height: info.height,
+                buffer: Mutex::new(Vec::new()) });
+        }
         let backend=crate::desktop_backend::detect()?;
         if backend == crate::desktop_backend::DesktopBackend::Kms {
             let kms=crate::kms::Capture::open()?;
@@ -146,6 +155,11 @@ impl ScreenCapture {
     /// 截取一帧 BGRA 图像
     pub fn capture_frame(&self) -> Result<Vec<u8>, String> {
         if let Some(error)=&self.init_error { return Err(error.clone()); }
+        #[cfg(target_os = "ios")]
+        if self.display == "ios:frida" {
+            let jpeg = crate::ios_platform::capture_jpeg(0.6)?;
+            return crate::ios_video::decode_jpeg(&jpeg, self.width, self.height);
+        }
         let mut buf = self.buffer.lock().unwrap();
         buf.resize(self.width as usize * self.height as usize * 4, 0);
         if let Some(kms)=&self.kms { kms.capture(&mut buf)?; return Ok(buf.clone()); }
@@ -181,6 +195,9 @@ impl Drop for ScreenCapture {
 
 /// Keep the display visible only while a peer is streaming; never unlock it.
 pub fn keep_display_awake() -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    { return crate::ios_platform::wake(); }
+    #[cfg(not(target_os = "ios"))]
     if crate::privacy_screen::active() { return Ok(()); }
     if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Kms { return Ok(()); }
     if crate::desktop_backend::detect()? == crate::desktop_backend::DesktopBackend::Portal {

@@ -739,6 +739,7 @@ impl WebRtcSession {
                             // then carries the new native size instead of a scaled one (desktop_mode). With
                             // UU_X11_MULTISCREEN the monitor layout stays as it is and the stream is scaled.
                             let resized = if desktop && active_screen.init_error.is_none() && active_screen.portal.is_none()
+                                && !active_screen.display.starts_with("ios:")
                                 && active_screen.backend == crate::desktop_backend::DesktopBackend::X11 && crate::desktop_mode::enabled()
                                 && !crate::wayland::x11_multiscreen() {
                                 match crate::capture_setting::requested_resolution(&rpc_fields) {

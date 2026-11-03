@@ -59,6 +59,12 @@ mod clipboard_protocol;
 mod clipboard_rich;
 mod viewer_metrics;
 mod cursor;
+#[cfg(target_os = "ios")]
+mod frida_bridge;
+#[cfg(target_os = "ios")]
+mod ios_platform;
+#[cfg(target_os = "ios")]
+mod ios_video;
 
 use auth::{Credentials, UUAuthClient};
 mod clipboard_probe;
@@ -210,8 +216,8 @@ pub(crate) fn cli_pref_ok(which: &str, value: &str) -> bool {
     }
 }
 
-const SUBCOMMANDS: [&str; 20] = ["privacy-guard", "privacy-wallpaper", "privacy-screen-probe", "doctor", "show", "assist", "set-encoder", "set-codec", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
-    "wayland-input-probe", "wayland-text-probe", "clipboard-acceptance", "portal-acceptance"];
+const SUBCOMMANDS: [&str; 23] = ["privacy-guard", "privacy-wallpaper", "privacy-screen-probe", "doctor", "show", "assist", "set-encoder", "set-codec", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    "wayland-input-probe", "wayland-text-probe", "clipboard-acceptance", "portal-acceptance", "ios-video-probe", "ios-input-probe", "ios-key-probe"];
 
 /// Unknown arguments and illegal set-encoder / set-codec values exit 2 (never start a second host).
 /// help / -h / --help exit 0 so main prints usage instead of starting the host.
@@ -394,6 +400,28 @@ fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
     Err(Box::new(std::process::Command::new("/proc/self/exe").env("UU_SHOW_WINDOW", "1").exec()))
 }
 
+/// iPad: no terminal and no GTK window, so the host runs the QR flow itself and writes the image
+/// for the home-screen panel app to display.
+#[cfg(target_os = "ios")]
+async fn run_ios_login() -> Credentials {
+    std::env::set_var("UU_LOGIN_QR_PNG", "/private/var/tmp/uu-qr.png");
+    loop {
+        let _ = std::fs::write("/private/var/tmp/uu-status.txt", "waiting-scan\n");
+        let ui = login_ui::LoginUi::attached();
+        match login::flow(&ui).await {
+            Ok(_) => {
+                let _ = std::fs::write("/private/var/tmp/uu-status.txt", "logged-in\n");
+                log::info!("QR login completed; restarting to pick up the new credentials");
+                std::process::exit(0); // launchd restarts the host, now with the token
+            }
+            Err(error) => {
+                log::warn!("QR login failed: {error}; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Not signed in, with a desktop: one window offers remote assistance (guest identity) and the QR
@@ -409,6 +437,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_logger::Builder::new().filter_level(log::LevelFilter::Off)
             .filter_module("uuremote_server", log::LevelFilter::Info).init();
     } else { env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init(); }
+    #[cfg(target_os = "ios")]
+    ios_platform::lift_memory_limit();
     // An unknown argument must never fall through to starting a second full host server.
     let arg1 = std::env::args().nth(1);
     let value_ok = match arg1.as_deref() {
@@ -601,6 +631,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("backend={:?} width={} height={} frame_bytes={}",screen.backend,screen.width,screen.height,frame.len());
         return Ok(());
     }
+    if std::env::args().nth(1).as_deref() == Some("ios-input-probe") {
+        #[cfg(target_os = "ios")]
+        {
+            let screen = ScreenCapture::new()?;
+            ios_platform::wake()?;
+            if ios_platform::locked() == Some(true) {
+                if let Ok(passcode) = std::env::var("UU_PROBE_PASSCODE") { println!("unlock={:?}", ios_platform::unlock(&passcode)); }
+            }
+            let x: f64 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(0.96);
+            let y: f64 = std::env::args().nth(3).and_then(|v| v.parse().ok()).unwrap_or(0.93);
+            println!("tap {x},{y} -> {:?}", ios_platform::tap(x, y));
+            std::thread::sleep(std::time::Duration::from_millis(1800));
+            let frame = screen.capture_frame()?;
+            let mut rgba = frame.clone();
+            for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); pixel[3] = 255; }
+            let png = cursor::encode_png(screen.width, screen.height, &rgba);
+            std::fs::write("/private/var/tmp/ios_tap.png", png)?;
+            println!("saved /private/var/tmp/ios_tap.png");
+            return Ok(());
+        }
+        #[cfg(not(target_os = "ios"))]
+        return Err("ios-input-probe is iOS only".into());
+    }
+    if std::env::args().nth(1).as_deref() == Some("ios-key-probe") {
+        #[cfg(target_os = "ios")]
+        {
+            let screen = ScreenCapture::new()?;
+            ios_platform::wake()?;
+            if ios_platform::locked() == Some(true) {
+                if let Ok(passcode) = std::env::var("UU_PROBE_PASSCODE") { println!("unlock={:?}", ios_platform::unlock(&passcode)); }
+            }
+            if std::env::var_os("UU_PROBE_DEBUG").is_some() {
+                println!("kbinfo: {:?}", ios_platform::kbinfo());
+                println!("senders: {:?}", ios_platform::senders());
+            }
+            if std::env::var_os("UU_PROBE_HOME").is_some() {
+                println!("home -> {:?}", ios_platform::home());
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+            }
+            if let Ok(taps) = std::env::var("UU_PROBE_TAP") {
+                for tap in taps.split(';') {
+                    let mut parts = tap.split(',');
+                    if let (Some(x), Some(y)) = (parts.next().and_then(|v| v.parse::<f64>().ok()), parts.next().and_then(|v| v.parse::<f64>().ok())) {
+                        println!("tap {x},{y} -> {:?}", ios_platform::tap(x, y));
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                    }
+                }
+            }
+            if let Ok(text) = std::env::var("UU_PROBE_TEXT") {
+                println!("type {text:?} -> {:?}", ios_platform::type_text(&text));
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+            }
+            let frame = screen.capture_frame()?;
+            let mut rgba = frame.clone();
+            for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); pixel[3] = 255; }
+            std::fs::write("/private/var/tmp/ios_key.png", cursor::encode_png(screen.width, screen.height, &rgba))?;
+            println!("saved /private/var/tmp/ios_key.png");
+            return Ok(());
+        }
+        #[cfg(not(target_os = "ios"))]
+        return Err("ios-key-probe is iOS only".into());
+    }
+    if std::env::args().nth(1).as_deref() == Some("ios-video-probe") {
+        #[cfg(target_os = "ios")]
+        {
+            let screen = ScreenCapture::new()?;
+            ios_platform::wake()?;
+            if ios_platform::locked() == Some(true) {
+                if let Ok(passcode) = std::env::var("UU_PROBE_PASSCODE") {
+                    println!("unlock={:?}", ios_platform::unlock(&passcode));
+                }
+            }
+            let fps = 30u32;
+            let hevc = std::env::var("UU_PROBE_CODEC").as_deref() == Ok("h265");
+            let mut encoder = ios_video::Encoder::new(screen.width / 2, screen.height / 2, fps, 60, 8_000, hevc)?;
+            let started = std::time::Instant::now();
+            let quality = std::env::var("UU_PROBE_QUALITY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+            let (mut frames, mut bytes, mut keys) = (0usize, 0usize, 0usize);
+            let (mut capture_us, mut encode_us, mut jpeg_bytes) = (0u128, 0u128, 0usize);
+            let mut dump: Vec<u8> = Vec::new();
+            let dump_enabled = std::env::var_os("UU_PROBE_DUMP").is_some();
+            while frames < 60 {
+                let t0 = std::time::Instant::now();
+                let jpeg = ios_platform::capture_jpeg(quality)?;
+                capture_us += t0.elapsed().as_micros();
+                jpeg_bytes += jpeg.len();
+                let t1 = std::time::Instant::now();
+                for unit in encoder.encode(&jpeg)? {
+                    bytes += unit.data.len();
+                    if unit.keyframe { keys += 1; }
+                    if dump_enabled { dump.extend_from_slice(&unit.data); }
+                }
+                encode_us += t1.elapsed().as_micros();
+                frames += 1;
+            }
+            if dump_enabled { std::fs::write(if hevc { "/private/var/tmp/ios_probe.h265" } else { "/private/var/tmp/ios_probe.h264" }, &dump)?; println!("dump bytes={}", dump.len()); }
+            println!("frames={frames} bytes={bytes} keyframes={keys} elapsed_ms={} capture_ms={} encode_ms={} jpeg_kb={}",
+                started.elapsed().as_millis(), capture_us / 1000, encode_us / 1000, jpeg_bytes / 1024);
+            return Ok(());
+        }
+        #[cfg(not(target_os = "ios"))]
+        return Err("ios-video-probe is iOS only".into());
+    }
     if std::env::args().nth(1).as_deref() == Some("desktop-video-probe") {
         if let Some(input)=std::env::var_os("UU_PROBE_INPUT") {
             return video::probe_input(input,std::env::args().nth(2)).await.map_err(|e|e.into());
@@ -652,8 +785,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session_ice::configure_relay_transport();
     // Before host.pid, and before assist: a missing or failed assist session must still handle SIGUSR2.
     let _ = install_host_signals(None);
-    video::warm_auto_probe();
-    video::check_ffmpeg_usable();
+    // iPad encodes with VideoToolbox in process; there is no FFmpeg binary to probe.
+    #[cfg(not(target_os = "ios"))]
+    {
+        video::warm_auto_probe();
+        video::check_ffmpeg_usable();
+    }
 
     if !desktop_backend::headless() && desktop_backend::detect()? == desktop_backend::DesktopBackend::X11 && desktop_backend::wayland_session_running() {
         // X11 capture inside a Wayland session reads XWayland's root window: all black, no error (#61).
@@ -752,6 +889,9 @@ async fn serve(mut capture: Arc<ScreenCapture>, input: Arc<InputInjector>, shutd
             Ok(creds) => creds,
             Err(e) => {
                 log::warn!("Not logged in: {e} ({} or UU_* environment variables)", config::path().display());
+                #[cfg(target_os = "ios")]
+                { run_ios_login().await }
+                #[cfg(not(target_os = "ios"))]
                 login::wait_for_credentials(None).await
             }
         };
