@@ -229,36 +229,45 @@ pub fn swipe(x1: f64, y1: f64, x2: f64, y2: f64, ms: u32) -> Result<(), String> 
 }
 pub fn home() -> Result<(), String> { with_hid(|s| s.call("home", "[]")).map(|_| ()) }
 
-/// The home-indicator gesture only starts in the bottom ~1.5% of the panel, which a viewer's mouse
-/// rarely hits. A press in the bottom band is held back: dragged upward it becomes a touch starting
-/// at the very edge (home / app switcher); released in place it is a plain tap where it was pressed.
+/// The keyboard Home button (consumer page Menu). Unlocked, iPadOS ignores a synthesized
+/// home-indicator swipe, and Cmd+H is not a system shortcut since iPadOS 15 (it is Globe+H).
+pub fn home_button() -> Result<(), String> { note_input(); with_hid(|s| s.call("button", "[64]")).map(|_| ()) }
+
+/// A press in the bottom band of the panel is held back: dragged upward it presses Home (what the
+/// home-indicator swipe does on the iPad itself); released in place it is a plain tap where it was.
 const BOTTOM_BAND: f64 = 0.96;
-const EDGE_Y: f64 = 0.995;
-static BOTTOM_PRESS: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+const HOME_DRAG: f64 = 0.04;
+#[derive(Clone, Copy)]
+enum BottomPress { Pending(f64, f64), Fired }
+static BOTTOM_PRESS: Mutex<Option<BottomPress>> = Mutex::new(None);
 
 pub fn pointer_down(x: f64, y: f64) -> Result<(), String> {
     if y >= BOTTOM_BAND {
         note_input();
-        if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = Some((x, y)); }
+        if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = Some(BottomPress::Pending(x, y)); }
         return Ok(());
     }
     down(x, y)
 }
 
 pub fn pointer_move(x: f64, y: f64) -> Result<(), String> {
-    let pending = BOTTOM_PRESS.lock().ok().and_then(|p| *p);
-    if let Some((sx, sy)) = pending {
-        if y > sy - 0.01 { return Ok(()); } // not an upward drag yet
-        if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = None; }
-        down(sx, EDGE_Y)?;
+    let press = BOTTOM_PRESS.lock().ok().and_then(|p| *p);
+    match press {
+        Some(BottomPress::Pending(_, sy)) if sy - y >= HOME_DRAG => {
+            if let Ok(mut press) = BOTTOM_PRESS.lock() { *press = Some(BottomPress::Fired); }
+            log::info!("iPad home gesture: bottom-edge drag");
+            home_button()
+        }
+        Some(_) => Ok(()), // waiting for the drag, or Home already pressed for this drag
+        None => move_to(x, y),
     }
-    move_to(x, y)
 }
 
 pub fn pointer_up(x: f64, y: f64) -> Result<(), String> {
-    let pending = BOTTOM_PRESS.lock().ok().and_then(|mut p| p.take());
-    match pending {
-        Some((sx, sy)) => tap(sx, sy),
+    let press = BOTTOM_PRESS.lock().ok().and_then(|mut p| p.take());
+    match press {
+        Some(BottomPress::Pending(sx, sy)) => tap(sx, sy),
+        Some(BottomPress::Fired) => Ok(()),
         None => up(x, y),
     }
 }

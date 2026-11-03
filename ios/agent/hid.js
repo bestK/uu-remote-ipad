@@ -134,12 +134,12 @@ function discoverKeyboardSender() {
   return STATE.sender || discoverSender();
 }
 
-function postKey(usage, down) {
+function postKey(usage, down, page) {
   const h = ensureHid();
   if (!KB.sender) KB.sender = discoverKeyboardSender();
   const create = new NativeFunction(findExp('IOHIDEventCreateKeyboardEvent'), 'pointer',
     ['pointer', 'uint64', 'uint32', 'uint32', 'uint8', 'uint32']);
-  const event = create(ptr(0), absTime(), 0x07, usage, down ? 1 : 0, 0);
+  const event = create(ptr(0), absTime(), page || 0x07, usage, down ? 1 : 0, 0);
   if (event.isNull()) throw new Error('no keyboard event');
   h.SetSender(event, KB.sender);
   inject(event);
@@ -150,6 +150,12 @@ rpc.exports = {
   key: function (usage, down, sender) {
     if (sender !== undefined && sender !== null && String(sender) !== '0') { KB.forced = String(sender); KB.sender = null; }
     postKey(usage, down ? 1 : 0);
+    return 'ok';
+  },
+  // Consumer-page buttons (page 0x0c): 0x40 Menu is the Home button of hardware keyboards, which
+  // works on Face ID iPads where a synthesized home-indicator swipe is ignored outside the lock screen.
+  button: function (usage) {
+    postKey(usage, 1, 0x0c); Thread.sleep(0.05); postKey(usage, 0, 0x0c);
     return 'ok';
   },
   senders: function () {

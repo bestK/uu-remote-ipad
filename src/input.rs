@@ -415,6 +415,16 @@ impl InputInjector {
             let key = if self.mac_controller.load(std::sync::atomic::Ordering::Relaxed) { key } else {
                 match key { 0x11 | 0xa2 => 0x5b, 0xa3 => 0x5c, 0x5b => 0xa2, 0x5c => 0xa3, other => other }
             };
+            // Cmd+H (PC Ctrl+H) goes home like on iPadOS 14; the system shortcut is now Globe+H,
+            // which no PC keyboard has.
+            static CMD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if matches!(key, 0x5b | 0x5c) { CMD.store(is_press, std::sync::atomic::Ordering::Relaxed); }
+            if key == 0x48 && (is_press && CMD.load(std::sync::atomic::Ordering::Relaxed) || !is_press && HOME.load(std::sync::atomic::Ordering::Relaxed)) {
+                HOME.store(is_press, std::sync::atomic::Ordering::Relaxed);
+                if is_press && crate::ios_platform::home_button().is_err() { log::warn!("iPad Home button injection failed"); }
+                return;
+            }
             return self.key_symbol_event(key, is_press);
         }
         #[allow(unreachable_code)]
