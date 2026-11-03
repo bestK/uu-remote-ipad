@@ -448,6 +448,26 @@ impl InputInjector {
             if !is_press { keys.swallowed.remove(&key); }
             return;
         }
+        // The controller's own input-source shortcut cycles the iPad's input sources: Win+Space on a
+        // PC, Ctrl+Space on a Mac (its default). iPadOS has no such shortcut of its own for these.
+        if key == 0x20 && ((!mac && keys.win) || (mac && keys.ctrl)) {
+            keys.swallowed.insert(key);
+            static LAST_SWITCH: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            let due = {
+                let mut last = LAST_SWITCH.lock().unwrap();
+                let due = is_press && last.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(250));
+                if due { *last = Some(std::time::Instant::now()); }
+                due
+            };
+            drop(keys);
+            if due {
+                match crate::ios_platform::next_input_mode() {
+                    Ok(mode) => log::info!("iPad shortcut: next input source ({})", if mode.starts_with("zh") { "CJK" } else { "latin" }),
+                    Err(error) => log::warn!("iPad input source switch failed: {error}"),
+                }
+            }
+            return;
+        }
         // PC Alt+Tab is iPad Cmd+Tab: Option is lifted and Cmd held until Alt is released, so Tab can be
         // pressed again to step through the apps.
         if !mac && keys.alt_tab && is_alt {

@@ -10,6 +10,8 @@
 > It now also ships an **experimental Linux viewer**, `uuremote-viewer`, that controls official Windows / Mac hosts or this
 > project's host from Linux (desktop, file transfer, terminal, port mapping, remote assistance; see
 > [below](#experimental-native-viewer-uuremote-viewer)).
+> A **jailbroken iPad** can be the controlled device too: the host runs on the iPad itself and the official
+> clients connect as usual (see [ios/README.md](ios/README.md)).
 > Desktop-less **Synology / NAS** boxes can run it in Docker: [deployment guide](docs/deploy-nas-docker.md#english), image
 > [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux).
 >

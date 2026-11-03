@@ -8,6 +8,7 @@
 > 装上之后，就能用官方的 Mac / Windows / 手机客户端远程控制你的 Linux 电脑。
 > 现在还附带一个**实验性 Linux 控制端** `uuremote-viewer`：在 Linux 上用 UU 账号远控官方 Windows / Mac 被控端或本项目主机
 > （桌面、文件传输、终端、端口映射、远程协助，详见[下文](#实验性原生控制端uuremote-viewer)）。
+> 越狱的 **iPad** 也能当被控端：宿主直接跑在 iPad 上，官方客户端照常连接（见 [ios/README.md](ios/README.md)）。
 > 没有桌面的**群晖 / NAS** 也能用 Docker 部署：[部署指南](docs/deploy-nas-docker.md)，镜像 [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux)。
 >
 > 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，

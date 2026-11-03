@@ -102,6 +102,9 @@ pub fn locked() -> Option<bool> {
     Some(value.contains("true"))
 }
 
+/// Cycles the iPad's input sources, what the Globe key does with a hardware keyboard.
+pub fn next_input_mode() -> Result<String, String> { with_screen(|s| s.call("nextinputmode", "[]")) }
+
 pub fn wake() -> Result<(), String> {
     with_screen(|s| s.call("wake", "[]")).map(|_| ())
 }

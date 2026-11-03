@@ -86,6 +86,38 @@ rpc.exports = {
     file.close();
     return buf.byteLength;
   },
+  // Cycles to the next input source: the job of the Globe key on a hardware keyboard. Walks the
+  // enabled sources in their own order (skipping the emoji keyboard, which a remote typist never
+  // wants) and returns the new identifier, a locale, not user data.
+  nextinputmode: function () {
+    return onMain(function () {
+      const m = ObjC.classes.UIKeyboardInputModeController.sharedInputModeController();
+      const current = String(m.currentInputMode().identifier());
+      let ids = [];
+      try {
+        const list = m.enabledInputModeIdentifiers();
+        for (let i = 0; i < list.count(); i++) ids.push(String(list.objectAtIndex_(i)));
+      } catch (e) {}
+      // One entry per language: the same language can be installed twice (Pinyin and Pinyin10).
+      const seen = {};
+      ids = ids.filter(function (id) {
+        if (id.indexOf('emoji') === 0) return false;
+        const language = id.split('@')[0];
+        if (seen[language]) return false;
+        seen[language] = true;
+        return true;
+      });
+      if (ids.length < 2) throw new Error('only one input source');
+      const at = ids.indexOf(current);
+      const next = ids[(at + 1) % ids.length];
+      const modes = m.inputModesFromIdentifiers_(ObjC.classes.NSArray.arrayWithObject_(next));
+      const target = modes.count() ? modes.objectAtIndex_(0) : null;
+      if (!target) throw new Error('input source not found');
+      m.setCurrentInputMode_(target);
+      try { m.updateCurrentInputMode_(target); } catch (e) {}
+      return next;
+    });
+  },
   wake: function () {
     return onMain(function () {
       // turnOnScreenFully alone no longer lights the panel on iPadOS 16+.
