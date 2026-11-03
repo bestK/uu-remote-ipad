@@ -40,6 +40,33 @@
 - 回桌面 / 多任务是发键盘的 Home 键：解锁后系统会忽略合成的“从底边上滑”手势，Cmd+H 在 iPadOS 15 起也不是系统快捷键（改成了 🌐+H）。
 - 密码框的屏幕键盘在远程画面里是灰块：iOS 不允许截屏包含安全输入的键盘。用电脑键盘直接打字即可。
 
+## 面板 App
+
+主屏上的「UU 远程」是唯一的操作入口，原生设置页风格，跟随系统深色模式和字号，中英双语：
+
+| 卡片 | 作用 |
+|---|---|
+| 状态 | 宿主是否在运行、是否已登录、当前有没有人在远程；未登录时直接显示扫码二维码；下面是最近一次远程的时间和时长 |
+| 安装服务 | 只在服务未安装时出现，输入设备密码一键安装（见下面的安装一节） |
+| 账号 | 显示登录状态，可退出登录（退出后需要重新扫码） |
+| 自动解锁 | 保存锁屏密码，远程连接时自动解锁；显示上次自动解锁成功还是被拒 |
+| 远程结束后锁屏 | 最后一个远程连接结束后自动锁屏 |
+| 远程快捷键 | 上面那张按键对照表 |
+| 连接记录 | 最近 5 次远程连接的时间和时长 |
+
+面板以 `mobile` 用户运行，和宿主（root）只通过文件通信：`/private/var/tmp/uu-status.json`（运行状态）、
+`uu-history.jsonl`（连接记录）、`uu-status.txt` / `uu-qr.png`（登录）、`uu-unlock.txt`（解锁结果），
+以及 `/var/mobile/Library/UURemote/` 下的 `unlock.key`、`settings.json`、`command`。这些文件都不含密码以外的个人内容，
+密码只用于解锁，不写入日志。
+
+## 已知限制
+
+- 被远程控制时，iPad 状态栏还没有「正在被远控」提示。试过在 SpringBoard 里自建浮层窗口，会把 SpringBoard 弄崩、
+  设备进安全模式，已放弃；需要换一种做法。
+- 剪贴板还没有同步。
+- 底部左右拖切 App 会先闪一下多任务界面（系统不认合成的手势和 Cmd+Tab，只能走多任务界面点卡片）。
+- 密码框弹出的屏幕键盘在远程画面里是灰块（iOS 不允许截屏包含安全输入的键盘），用电脑键盘直接打字。
+
 ## 目录
 
 | 路径 | 作用 |
@@ -65,11 +92,13 @@
 
 ```sh
 ios/frida/fetch-devkit.sh
+# frida 官方不提供 iOS 的 frida-server 二进制，从一台越狱 iPad 拷一份（不进仓库）：
+#   ssh mobile@<ipad> 'sudo cat /var/jb/usr/sbin/frida-server' > ios/frida/frida-server
 # Homebrew 的 cargo 没有 iOS std，用 rustup 工具链
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) UU_NO_GTK=1 \
   cargo build --release --target aarch64-apple-ios --bin uuremote-server
-ios/app/build.sh   # 面板 App
+ios/app/build.sh   # 面板 App + 带服务的 IPA（约 20 MB）
 ```
 
 ## 安装（iPad，root）

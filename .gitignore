@@ -16,3 +16,7 @@ target/
 /ios/probe/probe
 /ios/tweak/*.dylib
 /ios/app/.ldid.entitlements.plist
+
+# Local design-tool artifacts
+/.impeccable/
+/PRODUCT.md
