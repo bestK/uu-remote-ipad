@@ -310,14 +310,29 @@ pub fn home_button() -> Result<(), String> { note_input(); with_hid(|s| s.call("
 /// Home pressed twice opens the app switcher.
 pub fn app_switcher() -> Result<(), String> { note_input(); with_hid(|s| s.call("button", "[64,2]")).map(|_| ()) }
 
+/// Switches to the app used before this one, what a sideways swipe along the home indicator does.
+/// iPadOS ignores a synthesized home-indicator swipe and Cmd+Tab from a synthesized keyboard, so
+/// this opens the switcher and taps its first card: the grid keeps the current app in the top-right
+/// cell and the previous one top-left (measured on iPadOS 16).
+pub fn previous_app() -> Result<(), String> {
+    note_input();
+    app_switcher()?;
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(1200));
+        if let Err(error) = tap(0.44, 0.22) { log::warn!("iPad previous-app tap failed: {error}"); }
+    });
+    Ok(())
+}
+
 /// A press in the bottom band of the panel is held back and mirrors the home-indicator swipe on the
 /// iPad itself: dragged upward and released goes home; dragged, held still and released opens the
 /// app switcher; released without a drag it is a plain tap where it was pressed.
 const BOTTOM_BAND: f64 = 0.96;
 const HOME_DRAG: f64 = 0.04;
 const SWITCHER_PAUSE: Duration = Duration::from_millis(300);
+const SWITCH_DRAG: f64 = 0.06;
 #[derive(Clone, Copy)]
-enum BottomPress { Pending(f64, f64), Dragging { last_move: std::time::Instant } }
+enum BottomPress { Pending(f64, f64), Dragging { last_move: std::time::Instant }, Switched }
 static BOTTOM_PRESS: Mutex<Option<BottomPress>> = Mutex::new(None);
 
 pub fn pointer_down(x: f64, y: f64) -> Result<(), String> {
@@ -332,8 +347,19 @@ pub fn pointer_down(x: f64, y: f64) -> Result<(), String> {
 pub fn pointer_move(x: f64, y: f64) -> Result<(), String> {
     let Ok(mut press) = BOTTOM_PRESS.lock() else { return move_to(x, y) };
     match *press {
-        Some(BottomPress::Pending(_, sy)) if sy - y < HOME_DRAG => Ok(()), // not an upward drag yet
-        Some(_) => { *press = Some(BottomPress::Dragging { last_move: std::time::Instant::now() }); Ok(()) }
+        Some(BottomPress::Pending(sx, sy)) => {
+            let (across, up) = ((x - sx).abs(), sy - y);
+            if across >= SWITCH_DRAG && across > up {
+                *press = Some(BottomPress::Switched);
+                drop(press);
+                log::info!("iPad gesture: bottom-edge sideways drag -> previous app");
+                return previous_app();
+            }
+            if up >= HOME_DRAG { *press = Some(BottomPress::Dragging { last_move: std::time::Instant::now() }); }
+            Ok(())
+        }
+        Some(BottomPress::Dragging { .. }) => { *press = Some(BottomPress::Dragging { last_move: std::time::Instant::now() }); Ok(()) }
+        Some(BottomPress::Switched) => Ok(()),
         None => { drop(press); move_to(x, y) }
     }
 }
@@ -347,6 +373,7 @@ pub fn pointer_up(x: f64, y: f64) -> Result<(), String> {
             app_switcher()
         }
         Some(BottomPress::Dragging { .. }) => { log::info!("iPad gesture: bottom-edge drag -> home"); home_button() }
+        Some(BottomPress::Switched) => Ok(()),
         None => up(x, y),
     }
 }

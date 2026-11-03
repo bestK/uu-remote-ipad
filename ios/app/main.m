@@ -564,6 +564,7 @@ typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostO
     NSArray<NSArray<NSString *> *> *mouse = @[
         @[T(@"鼠标从屏幕最底部往上拖", @"Mouse: drag up from the bottom edge"), T(@"回桌面", @"Home screen")],
         @[T(@"往上拖并停住 0.3 秒", @"Drag up and hold 0.3 s"), T(@"多任务界面", @"App switcher")],
+        @[T(@"在屏幕最底部左右拖", @"Drag sideways at the bottom edge"), T(@"切到上一个 App", @"Previous app")],
     ];
     UIView *gap = [[UIView alloc] init];
     [gap.heightAnchor constraintEqualToConstant:4].active = YES;
