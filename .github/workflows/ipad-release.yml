@@ -26,9 +26,12 @@ jobs:
       - name: Build host
         run: |
           IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) UU_NO_GTK=1 \
+            UU_IPAD_VERSION=$GITHUB_REF_NAME \
             cargo build --release --locked --target aarch64-apple-ios --bin uuremote-server
       # The runner has no official UU Remote app, so make-icon.py leaves the system default icon.
       - name: Build IPA
+        env:
+          UU_IPAD_VERSION: ${{ github.ref_name }}
         run: |
           ios/app/build.sh "$RUNNER_TEMP/ipa"
           name=UURemotePanel-${GITHUB_REF_NAME}.ipa

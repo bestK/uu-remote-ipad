@@ -207,8 +207,12 @@ fn signed_in() -> bool {
         .and_then(|c| c.get("token").and_then(|t| t.as_str()).map(|t| !t.is_empty())).unwrap_or(false)
 }
 
+/// iPad release tag (ipad-vX.Y.Z) stamped by ios/app/build.sh, else the commit or "dev".
+pub const VERSION: &str = match option_env!("UU_IPAD_VERSION") { Some(v) => v, None => "dev" };
+
 fn write_status() {
     let status = serde_json::json!({
+        "version": VERSION,
         "signed_in": signed_in(),
         "viewers": VIEWERS.load(std::sync::atomic::Ordering::Relaxed),
         "last_session_end": LAST_END.load(std::sync::atomic::Ordering::Relaxed),

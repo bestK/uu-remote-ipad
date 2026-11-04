@@ -501,6 +501,7 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) BOOL installFinished;
 // Service uninstall
 @property(nonatomic) UIButton *uninstallButton;
+@property(nonatomic) UILabel *versionLabel;
 @property(nonatomic) UILabel *uninstallResult;
 @property(nonatomic) UILabel *uninstallOutput;
 @property(nonatomic) BOOL uninstalling;
@@ -1031,7 +1032,30 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     self.uninstallOutput = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
     self.uninstallOutput.hidden = YES;
     [stack addArrangedSubview:self.uninstallOutput];
+    // Panel and host can come from different builds (the host is installed separately).
+    self.versionLabel = MonoLabel(UIFontTextStyleCaption1, [UIColor secondaryLabelColor]);
+    self.versionLabel.numberOfLines = 0;
+    [stack addArrangedSubview:self.versionLabel];
     return card;
+}
+
+static NSString *PanelVersion(void) {
+    NSString *v = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"];
+    return v.length ? v : @"dev";
+}
+
+- (void)refreshVersion:(NSDictionary *)status {
+    NSString *host = [status[@"version"] isKindOfClass:[NSString class]] ? status[@"version"] : nil;
+    NSString *panel = PanelVersion();
+    NSString *text = [NSString stringWithFormat:@"%@ %@ · %@ %@", T(@"面板", @"Panel"), panel,
+        T(@"宿主", @"Host"), host ?: T(@"未运行", @"not running")];
+    // A host without the field predates versioning: it is older than any versioned panel.
+    BOOL mismatch = self.hostAvailable && ![host isEqualToString:panel];
+    if (mismatch) text = [text stringByAppendingFormat:@"\n%@",
+        T(@"版本不一致，请重新安装宿主服务", @"Versions differ; reinstall the host service")];
+    SetText(self.versionLabel, text);
+    UIColor *color = mismatch ? [UIColor systemOrangeColor] : [UIColor secondaryLabelColor];
+    if (![self.versionLabel.textColor isEqual:color]) self.versionLabel.textColor = color;
 }
 
 - (UIView *)unlockCardView {
@@ -1675,6 +1699,7 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
         && !self.installing && !self.uninstalling;
     SetHidden(self.accountResult, self.accountResult.text.length == 0);
     [self refreshUnlock];
+    [self refreshVersion:status];
 
     BOOL lockAfter = [ReadJSONDict(kSettingsPath)[@"lock_after_session"] boolValue];
     if (!self.lockSwitch.tracking && self.lockSwitch.on != lockAfter) [self.lockSwitch setOn:lockAfter animated:NO];

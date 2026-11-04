@@ -1,4 +1,7 @@
 fn main() {
+    // Re-exported so a version change rebuilds the crate (option_env! alone is not tracked).
+    println!("cargo:rerun-if-env-changed=UU_IPAD_VERSION");
+    if let Ok(version) = std::env::var("UU_IPAD_VERSION") { println!("cargo:rustc-env=UU_IPAD_VERSION={version}"); }
     println!("cargo:rerun-if-changed=c_engine/dmabuf_frame.h");
     println!("cargo:rerun-if-changed=c_engine/wayland_transform.h");
     println!("cargo:rerun-if-changed=c_engine/portal_clipboard.inc");

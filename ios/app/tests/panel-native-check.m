@@ -18,10 +18,15 @@ static void Check(BOOL ok, NSString *name) {
 @implementation NativeCheckDelegate
 
 - (void)fixture:(NSString *)state {
+    [self fixture:state hostVersion:PanelVersion()];
+}
+
+- (void)fixture:(NSString *)state hostVersion:(NSString *)hostVersion {
     BOOL down = [state isEqualToString:@"offline"];
     BOOL waiting = [state isEqualToString:@"waiting"];
-    NSDictionary *status = @{@"updated": @([[NSDate date] timeIntervalSince1970] - (down ? 30 : 0)),
-        @"signed_in": @(!waiting && !down), @"viewers": @([state isEqualToString:@"active"] ? 2 : 0)};
+    NSMutableDictionary *status = [@{@"updated": @([[NSDate date] timeIntervalSince1970] - (down ? 30 : 0)),
+        @"signed_in": @(!waiting && !down), @"viewers": @([state isEqualToString:@"active"] ? 2 : 0)} mutableCopy];
+    if (hostVersion) status[@"version"] = hostVersion;
     [[NSJSONSerialization dataWithJSONObject:status options:0 error:nil] writeToFile:kStatusJSONPath atomically:YES];
     [(waiting ? @"waiting-scan" : @"online") writeToFile:kStatusPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     [@"" writeToFile:kHistoryPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -194,6 +199,19 @@ static void Check(BOOL ok, NSString *name) {
         && [self.panel.accountResult.text isEqualToString:T(@"退出超时，请重试", @"Sign-out timed out; try again")],
         @"退出超时恢复重试而非永久等待");
     [[NSFileManager defaultManager] removeItemAtPath:kCommandPath error:nil];
+    [self fixture:@"online"];
+    [self.panel refresh];
+    Check([self.panel.versionLabel.text containsString:PanelVersion()]
+        && ![self.panel.versionLabel.text containsString:@"\n"], @"面板与宿主版本一致时只显示版本号");
+    [self fixture:@"online" hostVersion:@"ipad-v0.0.1"];
+    [self.panel refresh];
+    Check([self.panel.versionLabel.text containsString:@"ipad-v0.0.1"]
+        && [self.panel.versionLabel.text containsString:T(@"版本不一致，请重新安装宿主服务", @"Versions differ; reinstall the host service")],
+        @"宿主版本不同时提示重新安装服务");
+    [self fixture:@"online" hostVersion:nil];
+    [self.panel refresh];
+    Check([self.panel.versionLabel.text containsString:T(@"版本不一致", @"Versions differ")],
+        @"不上报版本的旧宿主同样提示不一致");
     [self fixture:@"offline"];
     [self.panel refresh];
     Check(self.panel.displayedState == HostDown && !self.panel.installCard.hidden, @"陈旧状态显示离线与安装入口");

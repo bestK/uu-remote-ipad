@@ -8,6 +8,9 @@ APP=$OUT/UURemotePanel.app
 SERVICE=$APP/service
 ROOT=$(cd ../.. && pwd)
 HOST=$ROOT/target/aarch64-apple-ios/release/uuremote-server
+# One version for the panel and the host it carries: the release tag, else the commit.
+# The host must be built with the same UU_IPAD_VERSION (the panel flags a mismatch).
+VERSION=${UU_IPAD_VERSION:-dev-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 
 [ -f "$HOST" ] || {
     echo "missing $HOST" >&2
@@ -31,6 +34,8 @@ xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -fobjc-arc -O
     -isysroot "$SDK" -framework UIKit -framework Foundation -framework QuartzCore \
     -o "$APP/UURemotePanel" main.m
 cp Info.plist "$APP/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Info.plist"
+grep -qF "$VERSION" "$HOST" || echo "warning: $HOST was not built with UU_IPAD_VERSION=$VERSION" >&2
 # Icon from the locally installed official app (no NetEase artwork in the repo).
 python3 make-icon.py "$APP"
 
