@@ -141,17 +141,51 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
 
+/// iPad (roothide): the daemon sees the real root, where `/bin/bash` does not exist; jailbreak
+/// binaries live under the randomized `.jbroot-*` directory that holds the host binary.
+#[cfg(target_os = "ios")]
+fn jbroot() -> std::path::PathBuf {
+    std::env::current_exe().ok().and_then(|exe| exe.ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".jbroot-"))).map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| "/var/jb".into())
+}
+
+/// The shell for a new session: the viewer's choice, then $SHELL, then the platform defaults.
+fn pick_shell(requested: Option<&str>) -> Option<String> {
+    let mut candidates: Vec<String> = requested.filter(|s| s.starts_with('/')).map(str::to_owned).into_iter()
+        .chain(std::env::var("SHELL").ok()).collect();
+    #[cfg(target_os = "ios")]
+    {
+        let root = jbroot();
+        let rooted: Vec<String> = candidates.iter().map(|s| root.join(s.trim_start_matches('/')).to_string_lossy().into_owned()).collect();
+        candidates.extend(rooted);
+        candidates.extend(["usr/bin/zsh", "usr/bin/bash", "bin/sh"].map(|s| root.join(s).to_string_lossy().into_owned()));
+    }
+    candidates.extend(["/bin/bash", "/bin/sh"].map(String::from));
+    candidates.into_iter().find(|s| std::path::Path::new(s).is_file())
+}
+
 fn spawn(requested_id: u32, cols: u16, rows: u16, shell: Option<&str>) -> Result<Arc<Session>, String> {
     use std::os::unix::process::CommandExt;
     let win = nix::pty::Winsize { ws_row: rows.max(1), ws_col: cols.max(1), ws_xpixel: 0, ws_ypixel: 0 };
     let pty = nix::pty::openpty(Some(&win), None).map_err(|e| format!("openpty failed: {e}"))?;
-    let shell = shell.filter(|s| s.starts_with('/') && std::path::Path::new(s).exists()).map(str::to_owned)
-        .or_else(|| std::env::var("SHELL").ok().filter(|s| std::path::Path::new(s).exists()))
-        .unwrap_or_else(|| "/bin/bash".into());
+    let shell = pick_shell(shell).ok_or("no shell found")?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     let slave = pty.slave;
     let io = |fd: &OwnedFd| fd.try_clone().map(std::process::Stdio::from).map_err(|e| format!("pty dup failed: {e}"));
     let mut cmd = std::process::Command::new(&shell);
+    // iPad: the host is a root daemon. The shell runs as `mobile`, like an SSH login (sudo still works),
+    // with a clean environment so host settings (frida address, tokens) never leak into it.
+    #[cfg(target_os = "ios")]
+    let home = {
+        let root = jbroot();
+        let path = ["usr/bin", "bin", "usr/sbin", "sbin", "usr/local/bin"].iter()
+            .map(|p| root.join(p).to_string_lossy().into_owned())
+            .chain(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(String::from)).collect::<Vec<_>>().join(":");
+        cmd.env_clear().env("PATH", path).env("USER", "mobile").env("LOGNAME", "mobile").env("SHELL", &shell)
+            .env("HOME", "/var/mobile");
+        "/var/mobile".to_string()
+    };
     cmd.arg("-l").current_dir(&home)
         .env("TERM", "xterm-256color").env("COLORTERM", "truecolor")
         .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()))
@@ -160,6 +194,13 @@ fn spawn(requested_id: u32, cols: u16, rows: u16, shell: Option<&str>) -> Result
         cmd.pre_exec(|| {
             if libc::setsid() < 0 { return Err(std::io::Error::last_os_error()); }
             if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 { return Err(std::io::Error::last_os_error()); }
+            #[cfg(target_os = "ios")]
+            if libc::getuid() == 0 {
+                const MOBILE: libc::uid_t = 501;
+                if libc::setgroups(1, &MOBILE) < 0 || libc::setgid(MOBILE) < 0 || libc::setuid(MOBILE) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(())
         });
     }
