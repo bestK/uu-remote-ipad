@@ -15,12 +15,12 @@ HOST=$ROOT/target/aarch64-apple-ios/release/uuremote-server
     exit 1
 }
 
-# frida-server is ~18 MB and ships inside the IPA. Frida publishes no iOS server binary, so it is
-# copied once from a jailbroken device (ios/frida/* is git-ignored) or built from frida's source.
+# frida-server is ~18 MB and ships inside the IPA, extracted from Frida's official iphoneos-arm64
+# package by ios/frida/fetch-server.sh (ios/frida/* is git-ignored).
 FRIDA=$ROOT/ios/frida/frida-server
 if [ ! -f "$FRIDA" ]; then
     echo "missing $FRIDA" >&2
-    echo "copy it from a jailbroken iPad: ssh mobile@<ipad> 'sudo cat /var/jb/usr/sbin/frida-server' > ios/frida/frida-server" >&2
+    echo "fetch it first: ios/frida/fetch-server.sh" >&2
     exit 1
 fi
 

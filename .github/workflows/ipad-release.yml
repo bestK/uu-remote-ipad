@@ -1,0 +1,45 @@
+name: iPad release
+
+# iPad builds only; `v*` tags keep running the Linux release.
+on:
+  push:
+    tags: ['ipad-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      # Both come from Frida's official release assets, pinned by SHA-256 in the scripts.
+      - run: ios/frida/fetch-devkit.sh
+      - run: ios/frida/fetch-server.sh
+      - run: cargo test --locked
+      - name: Build host
+        run: |
+          IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) UU_NO_GTK=1 \
+            cargo build --release --locked --target aarch64-apple-ios --bin uuremote-server
+      # The runner has no official UU Remote app, so make-icon.py leaves the system default icon.
+      - name: Build IPA
+        run: |
+          ios/app/build.sh "$RUNNER_TEMP/ipa"
+          name=UURemotePanel-${GITHUB_REF_NAME}.ipa
+          mv "$RUNNER_TEMP/ipa/UURemotePanel.ipa" "$name"
+          shasum -a 256 "$name" > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipa
+          path: UURemotePanel-*.ipa*
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/release-notes/${{ github.ref_name }}.md
+          files: |
+            UURemotePanel-*.ipa
+            UURemotePanel-*.ipa.sha256

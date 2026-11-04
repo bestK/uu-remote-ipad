@@ -122,8 +122,8 @@ iPad 的扫码状态长轮询在 60 秒超时后继续查询同一个二维码�
 
 ```sh
 ios/frida/fetch-devkit.sh
-# frida 官方不提供 iOS 的 frida-server 二进制，从一台越狱 iPad 拷一份（不进仓库）：
-#   ssh mobile@<ipad> 'sudo cat /var/jb/usr/sbin/frida-server' > ios/frida/frida-server
+# frida-server 取自 Frida 官方 iphoneos-arm64 包（按 SHA-256 校验，不进仓库）
+ios/frida/fetch-server.sh
 # Homebrew 的 cargo 没有 iOS std，用 rustup 工具链
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) UU_NO_GTK=1 \

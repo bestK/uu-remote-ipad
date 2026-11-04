@@ -10,6 +10,7 @@ target/
 # iPad host: frida devkit (ios/frida/fetch-devkit.sh) and device build outputs
 /ios/frida/*
 !/ios/frida/fetch-devkit.sh
+!/ios/frida/fetch-server.sh
 !/ios/frida/test.c
 /ios/app/build/
 /ios/probe/client

@@ -5,7 +5,6 @@ No NetEase artwork is stored in this repository (AGENTS.md): the icon is derived
 /Applications/UURemote.app, with its white tile turned black. Usage: make-icon.py OUT_APP_DIR
 """
 import os, subprocess, sys, tempfile
-from PIL import Image
 
 SOURCE = "/Applications/UURemote.app/Contents/Resources/AppIcon.icns"
 # (file name, edge in pixels) for CFBundleIcons~ipad; iOS masks the corners itself.
@@ -37,6 +36,8 @@ def main(out_dir):
     if not os.path.exists(SOURCE):
         print("make-icon: official UU Remote app not installed; building without an icon")
         return
+    global Image
+    from PIL import Image  # only needed when the official app is there to derive from
     with tempfile.TemporaryDirectory() as tmp:
         iconset = os.path.join(tmp, "AppIcon.iconset")
         subprocess.run(["iconutil", "-c", "iconset", SOURCE, "-o", iconset], check=True, capture_output=True)
