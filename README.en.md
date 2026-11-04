@@ -1,24 +1,40 @@
-# uu-remote-linux · Unofficial Linux host and viewer for NetEase UU Remote
+# uu-remote-ipad · Control a jailbroken iPad from the official UU Remote clients (unofficial)
 
 [简体中文](README.md) | **English**
 
-> **A note first**
+> **This repository is the iPad host.** The host runs on a jailbroken iPad itself, and the official NetEase
+> UU Remote (网易 UU 远程) clients (Windows / Mac / mobile) connect to it as usual to control the iPad.
+> Ported from [uu-remote-linux](https://github.com/bestK/uu-remote-linux); the Linux documentation follows below.
 >
-> NetEase UU Remote (网易 UU 远程) is a great remote-desktop tool, but there is no Linux version on its
+> This is a personal hobby project. **It is not affiliated with NetEase and is not an official client.**
+> If NetEase considers this project infringing or inappropriate, please DM me on X
+> **[@ai_fengshou](https://x.com/ai_fengshou)** and I will take it down right away.
+
+## iPad host
+
+- **Picture**: SpringBoard capture with VideoToolbox H.264 / H.265 hardware encoding; about 23 fps and 11 ms latency measured on a 12.9-inch iPad Pro (M1).
+- **Rotation**: the picture and touch coordinates follow the iPad's orientation.
+- **Touch and keyboard**: mouse clicks and drags become touches, and the computer keyboard types directly; Ctrl/Cmd shortcuts, Home, app switcher, previous app and input-source switching.
+- **Lock screen**: shown as usual; a saved passcode unlocks automatically, and the iPad can lock when the session ends.
+- **Terminal**: the viewer's Terminal opens zsh on the iPad (as `mobile`, with `sudo` available).
+- **Panel app**: "UU 远程" on the home screen installs the service, signs in by QR code and shows the connection state and history.
+
+Requires a jailbreak (verified on Dopamine / roothide, iPadOS 16). Install `UURemotePanel.ipa` with TrollStore or SideStore,
+open the panel and enter the device password to install the service, then scan the QR code with the UU Remote mobile app.
+Full instructions, remote shortcuts, building and known limits (Chinese): **[ios/README.md](ios/README.md)**.
+
+---
+
+## Linux host (upstream uu-remote-linux)
+
+> NetEase UU Remote is a great remote-desktop tool, but there is no Linux version on its
 > official website. So, with the help of Claude and Codex, I wrote this open-source Linux host: install it,
 > and you can control your Linux machine from the official Mac / Windows / mobile UU Remote clients.
 > It now also ships an **experimental Linux viewer**, `uuremote-viewer`, that controls official Windows / Mac hosts or this
 > project's host from Linux (desktop, file transfer, terminal, port mapping, remote assistance; see
 > [below](#experimental-native-viewer-uuremote-viewer)).
-> A **jailbroken iPad** can be the controlled device too: the host runs on the iPad itself and the official
-> clients connect as usual (see [ios/README.md](ios/README.md)).
-> The iPad panel uses 28pt rounded cards and a floating bottom capsule switcher (Connect / Security / Shortcuts), with a lime status pill in Light Mode and an electric-blue asterisk hero card in Dark Mode; the host protocol is unchanged. After signing out, scan a new QR code in the panel to sign in again; QR refresh is available there too. On iPad, a long-poll timeout keeps the current QR and retries instead of abandoning the sign-in. Security → Host Service lets you confirm and uninstall with your sudo password, keeping sign-in, settings, history and the shared Frida binary.
 > Desktop-less **Synology / NAS** boxes can run it in Docker: [deployment guide](docs/deploy-nas-docker.md#english), image
 > [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux).
->
-> This is a personal hobby project. **It is not affiliated with NetEase and is not an official client.**
-> If NetEase considers this project infringing or inappropriate, please DM me on X
-> **[@ai_fengshou](https://x.com/ai_fengshou)** and I will take it down right away.
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux viewer launcher: device list (device names redacted)"></p>
 <p align="center"><sub>Linux viewer: device list (device names redacted)</sub></p>

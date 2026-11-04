@@ -1,19 +1,35 @@
-# uu-remote-linux · UU 远程 Linux 被控端 + 控制端（非官方）
+# uu-remote-ipad · 用官方 UU 远程控制越狱 iPad（非官方）
 
 **简体中文** | [English](README.en.md)
 
-> **写在前面**
+> **本仓库是 iPad 被控端。** 宿主直接跑在越狱 iPad 上，官方 UU 远程客户端（Windows / Mac / 手机）照常连接，
+> 就能远程操作 iPad。基于 [uu-remote-linux](https://github.com/bestK/uu-remote-linux) 移植，Linux 部分保留在本文后半。
 >
+> 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，
+> 请在推特私信我 **[@ai_fengshou](https://x.com/ai_fengshou)**，我会第一时间自行下架。
+
+## iPad 版
+
+- **画面**：SpringBoard 抓屏 + VideoToolbox 硬件编码 H.264 / H.265，iPad Pro 12.9 英寸（M1）上实测约 23 fps、延迟约 11 ms。
+- **横竖屏**：画面和触控坐标跟随 iPad 旋转。
+- **触控与键盘**：鼠标点按拖动变成触摸，电脑键盘直接打字；Ctrl/Cmd 快捷键、回桌面、多任务、切 App、切输入法。
+- **锁屏**：锁屏界面照常显示；可保存密码自动解锁，远程结束后自动锁屏。
+- **终端**：主控的「终端」直接打开 iPad 的 zsh（以 `mobile` 身份，`sudo` 可用）。
+- **面板 App**：主屏上的「UU 远程」负责安装服务、扫码登录、查看连接状态和记录。
+
+需要越狱（已验证 Dopamine / roothide，iPadOS 16）。安装：用 TrollStore 或 SideStore 装 `UURemotePanel.ipa`，
+打开面板输入设备密码装服务，再用手机「网易UU远程」扫码登录。
+完整说明、远控快捷键、构建方法和已知限制见 **[ios/README.md](ios/README.md)**。
+
+---
+
+## Linux 版（上游 uu-remote-linux）
+
 > 网易 UU 远程非常好用，但官网一直没有 Linux 版本。于是我借助 Claude 和 Codex，写了这个开源的 Linux 被控端：
 > 装上之后，就能用官方的 Mac / Windows / 手机客户端远程控制你的 Linux 电脑。
 > 现在还附带一个**实验性 Linux 控制端** `uuremote-viewer`：在 Linux 上用 UU 账号远控官方 Windows / Mac 被控端或本项目主机
 > （桌面、文件传输、终端、端口映射、远程协助，详见[下文](#实验性原生控制端uuremote-viewer)）。
-> 越狱的 **iPad** 也能当被控端：宿主直接跑在 iPad 上，官方客户端照常连接（见 [ios/README.md](ios/README.md)）。
-> iPad 面板采用 28pt 大圆角卡片与底部悬浮胶囊切换栏（「连接 / 安全 / 快捷键」），浅色配荧光青柠状态胶囊、深色配电光蓝星芒主卡；后台协议不变。退出登录后可在 App 内重新扫码，并支持刷新二维码；iPad 后台的扫码长轮询超时后保持原码继续等待。「安全 → 宿主服务」支持确认并输入 sudo 密码后卸载，保留登录、设置、记录与共享的 Frida 程序。
 > 没有桌面的**群晖 / NAS** 也能用 Docker 部署：[部署指南](docs/deploy-nas-docker.md)，镜像 [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux)。
->
-> 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，
-> 请在推特私信我 **[@ai_fengshou](https://x.com/ai_fengshou)**，我会第一时间自行下架。
 
 <p align="center"><img src="docs/images/viewer-window.png" width="720" alt="Linux 控制端启动窗口：设备列表（设备名已打码）"></p>
 <p align="center"><sub>Linux 控制端：设备列表（设备名已打码）</sub></p>
