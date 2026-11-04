@@ -9,6 +9,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -133,19 +134,27 @@ static CVPixelBufferRef decode_jpeg(const unsigned char *jpeg, size_t len, int d
     // Ask ImageIO for a scaled decode when the encoder runs below the panel size:
     // JPEG DCT scaling is far cheaper than a full decode followed by a resample.
     size_t full_w = 0, full_h = 0;
+    int orientation = 1;
     CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(src, 0, NULL);
     if (props) {
         CFNumberRef pw = CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
         CFNumberRef ph = CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
+        CFNumberRef po = CFDictionaryGetValue(props, kCGImagePropertyOrientation);
         if (pw) CFNumberGetValue(pw, kCFNumberSInt64Type, &full_w);
         if (ph) CFNumberGetValue(ph, kCFNumberSInt64Type, &full_h);
+        if (po) CFNumberGetValue(po, kCFNumberIntType, &orientation);
         CFRelease(props);
     }
+    static _Atomic uint64_t last_size = 0;
+    uint64_t size = ((uint64_t)(orientation & 0xff) << 56) | ((uint64_t)full_w << 28) | full_h;
+    if (full_w && full_h && atomic_exchange(&last_size, size) != size)
+        fprintf(stderr, "[ios_video] captured JPEG dimensions: %zux%zu, orientation=%d, encoder: %dx%d\n", full_w, full_h, orientation, dst_w, dst_h);
     CGImageRef image = NULL;
-    if (dst_w > 0 && dst_h > 0 && full_w > (size_t)dst_w && full_h > (size_t)dst_h) {
+    if (orientation != 1 || (dst_w > 0 && dst_h > 0 && full_w > (size_t)dst_w && full_h > (size_t)dst_h)) {
+        size_t max_pixel = dst_w > 0 && dst_h > 0 ? (size_t)(dst_w > dst_h ? dst_w : dst_h) : (full_w > full_h ? full_w : full_h);
         NSDictionary *thumb = @{(id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
                                 (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
-                                (id)kCGImageSourceThumbnailMaxPixelSize: @(dst_w > dst_h ? dst_w : dst_h),
+                                (id)kCGImageSourceThumbnailMaxPixelSize: @(max_pixel),
                                 (id)kCGImageSourceShouldCache: @NO};
         image = CGImageSourceCreateThumbnailAtIndex(src, 0, (__bridge CFDictionaryRef)thumb);
     }

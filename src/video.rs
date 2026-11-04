@@ -1031,6 +1031,9 @@ async fn read_ios(
     let fps = u32::from(settings.fps).max(1);
     let (units_tx, mut units) = mpsc::channel::<crate::ios_video::Au>(4);
     let stop = Arc::new(AtomicBool::new(false));
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop { fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); } }
+    let _stop = Stop(stop.clone());
     // Encode at most 1600 px wide: the native panel's JPEG decode dominates the frame budget.
     let (out_w, out_h) = if size.0 > 1600 { (size.0 / 2, size.1 / 2) } else { size };
     let (jpeg_tx, jpeg_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
@@ -1262,16 +1265,24 @@ fn keep_stream_display_awake() {
     if result.is_err() { log::warn!("Display wake failed; continuing desktop stream and retrying next interval"); }
 }
 
-/// `sync_tx` receives a Message 25 payload when a live encoder switch changes the encoded chroma.
+/// Updates sent to the CONTROL channel by the video worker.
+pub enum VideoSync { Settings(Vec<u8>), Geometry((u32, u32), VideoSettings) }
+
+fn changed_geometry(old: (u32, u32), new: (u32, u32)) -> Option<(u32, u32)> {
+    (new.0 > 0 && new.1 > 0 && new != old).then_some(new)
+}
+
+
+/// `sync_tx` receives live video settings and geometry updates.
 pub async fn stream_desktop(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_track::VideoTrack>, size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
     settings: tokio::sync::watch::Receiver<VideoSettings>, applied: Arc<tokio::sync::watch::Sender<VideoSettings>>, idr: Arc<AtomicBool>,
-    selection: crate::video_select::Selection, sync_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>) -> Result<(), String> {
+    selection: crate::video_select::Selection, sync_tx: Option<tokio::sync::mpsc::UnboundedSender<VideoSync>>) -> Result<(), String> {
     stream_desktop_at(pc, track, size, display, portal, settings, applied, idr, selection, sync_tx, crate::video_select::reload_generation_value()).await
 }
 
 pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::video_track::VideoTrack>, mut size: (u32, u32), display: String, portal:Option<Arc<crate::portal::PortalSession>>,
     mut settings: tokio::sync::watch::Receiver<VideoSettings>, applied: Arc<tokio::sync::watch::Sender<VideoSettings>>, idr: Arc<AtomicBool>,
-    selection: crate::video_select::Selection, sync_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>, reload_at_session: u64) -> Result<(), String> {
+    selection: crate::video_select::Selection, sync_tx: Option<tokio::sync::mpsc::UnboundedSender<VideoSync>>, reload_at_session: u64) -> Result<(), String> {
     let _desktop_mode = crate::desktop_mode::StreamGuard::new();
     loop {
         if transport_closed(&pc) { return Ok(()); }
@@ -1323,6 +1334,7 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
     let mut max_send_ms = 0u128;
     let mut health = tokio::time::interval(Duration::from_millis(200));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut geometry_poll = tokio::time::interval(Duration::from_secs(1));
     let mut stats = Instant::now();
     // sent/skipped are cumulative; window_* and max_* cover the interval since the last stats line.
     let (mut window_frames, mut window_skipped) = (0u64, 0u64);
@@ -1352,7 +1364,7 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
                             // Wayland: x11_resized is None, and the connection size can be a previous output.
                             let native = x11_resized(&display, portal_stream, size).unwrap_or_else(|| crate::wayland::sync_native(&display, current.source_id, size));
                             let payload = crate::capture_setting::sync_payload(&current, native);
-                            let _ = sync.send(payload);
+                            let _ = sync.send(VideoSync::Settings(payload));
                         }
                     }
                     // In-process engines honor this on the first frame; the process pipeline starts on an IDR.
@@ -1428,6 +1440,21 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
                     reader.0 = tokio::spawn(open(size, live_selection, current));
                 }
             },
+            _ = geometry_poll.tick(), if cfg!(target_os = "ios") && display.starts_with("ios:") => {
+                #[cfg(target_os = "ios")]
+                if let Ok(Ok(info)) = tokio::task::spawn_blocking(crate::ios_platform::info).await {
+                    if let Some(next_size) = changed_geometry(size, (info.width, info.height)) {
+                        log::info!("iPad screen size changed: {}x{} -> {}x{}", size.0, size.1, next_size.0, next_size.1);
+                        size = next_size;
+                        reader.0.abort();
+                        let _ = (&mut reader.0).await;
+                        while receiver.try_recv().is_ok() {}
+                        idr.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(sync) = sync_tx.as_ref() { let _ = sync.send(VideoSync::Geometry(size, current)); }
+                        reader.0 = tokio::spawn(open(size, live_selection, current));
+                    }
+                }
+            },
             changed = settings.changed(), if settings_open => {
                 if changed.is_err() { settings_open = false; }
                 continue;
@@ -1482,6 +1509,14 @@ pub async fn stream_desktop_at(pc: Arc<RTCPeerConnection>, track: Arc<crate::vid
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rotation_geometry_changes_in_both_directions() {
+        assert_eq!(super::changed_geometry((2048, 1536), (1536, 2048)), Some((1536, 2048)));
+        assert_eq!(super::changed_geometry((1536, 2048), (2048, 1536)), Some((2048, 1536)));
+        assert_eq!(super::changed_geometry((2048, 1536), (2048, 1536)), None);
+        assert_eq!(super::changed_geometry((2048, 1536), (0, 1536)), None);
+    }
+
     #[test]
     fn nvidia_display_is_detected_from_connected_connectors() {
         use std::os::unix::fs::symlink;

@@ -135,9 +135,29 @@ pub fn normalized_pointer(x: f64, y: f64, width: u32, height: u32) -> Option<(i3
     Some(((x * (width - 1) as f64).round() as i32, (y * (height - 1) as f64).round() as i32))
 }
 
+/// Map a point in the oriented iPad picture back to the physical portrait HID surface.
+#[cfg(any(target_os = "ios", test))]
+pub fn ios_native_pointer(x: f64, y: f64, orientation: u64) -> (f64, f64) {
+    match orientation {
+        2 => (1.0 - x, 1.0 - y),
+        3 => (1.0 - y, x),
+        4 => (y, 1.0 - x),
+        _ => (x, y),
+    }
+}
+
 #[cfg(test)]
 mod pointer_tests {
-    use super::normalized_pointer;
+    use super::{ios_native_pointer, normalized_pointer};
+    #[test]
+    fn ipad_orientation_maps_picture_corners_to_physical_surface() {
+        assert_eq!(ios_native_pointer(0.0, 0.0, 1), (0.0, 0.0));
+        assert_eq!(ios_native_pointer(0.0, 0.0, 2), (1.0, 1.0));
+        assert_eq!(ios_native_pointer(0.0, 0.0, 3), (1.0, 0.0));
+        assert_eq!(ios_native_pointer(0.0, 0.0, 4), (0.0, 1.0));
+        assert_eq!(ios_native_pointer(1.0, 1.0, 3), (0.0, 1.0));
+        assert_eq!(ios_native_pointer(1.0, 1.0, 4), (1.0, 0.0));
+    }
     #[test]
     fn maps_source_screen_edges_and_center() {
         assert_eq!(normalized_pointer(0.0, 0.0, 1920, 1080), Some((0,0)));

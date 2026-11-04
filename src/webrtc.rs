@@ -103,7 +103,7 @@ struct DesktopStream {
     settings: Arc<tokio::sync::watch::Sender<crate::capture_setting::VideoSettings>>,
     idr_request: Arc<std::sync::atomic::AtomicBool>,
     selection: crate::video_select::Selection,
-    chroma_sync: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    chroma_sync: Option<tokio::sync::mpsc::UnboundedSender<crate::video::VideoSync>>,
     reload_at_session: u64,
 }
 
@@ -451,7 +451,7 @@ impl WebRtcSession {
         let desktop_sound = desktop && crate::audio::enabled();
         if desktop && !cfg!(test) { track_session(pc.clone(), peer_actions.clone(), &role); }
         // Live encoder switch (SIGUSR2) sends CaptureSettingSync when chroma is downgraded.
-        let (chroma_sync_tx, chroma_sync_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (chroma_sync_tx, chroma_sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::video::VideoSync>();
         let chroma_sync_rx = Arc::new(std::sync::Mutex::new((!cfg!(test)).then_some(chroma_sync_rx)));
         // File/terminal/port-mapping connections carry no desktop video until capture_desktop.
         let control_video_track = video_track.clone();
@@ -590,10 +590,19 @@ impl WebRtcSession {
                         let sync_out = outbound.clone();
                         let sync_seq = reply_sequence.clone();
                         tokio::spawn(async move {
-                            while let Some(payload) = chroma_sync_rx.recv().await {
+                            while let Some(update) = chroma_sync_rx.recv().await {
                                 let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                let seq = sync_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let _ = sync_out.send(crate::initialization::envelope(seq, timestamp, 25, &payload));
+                                let next = || sync_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let payload = match update {
+                                    crate::video::VideoSync::Settings(payload) => payload,
+                                    crate::video::VideoSync::Geometry(size, settings) => {
+                                        let sent = crate::capture_setting::screen_sources(next(), timestamp, size, settings.output, &crate::login::desktop_name())
+                                            .is_ok_and(|message| sync_out.send(message).is_ok());
+                                        log::info!("Screen geometry update queued: native={}x{} output={:?} sources={sent}", size.0, size.1, settings.output);
+                                        crate::capture_setting::sync_payload(&settings, size)
+                                    }
+                                };
+                                let _ = sync_out.send(crate::initialization::envelope(next(), timestamp, 25, &payload));
                             }
                         });
                     }
@@ -702,6 +711,9 @@ impl WebRtcSession {
                             let input_size = if active_screen.init_error.is_none() {
                                 active_screen.portal.as_ref().map_or((active_screen.width, active_screen.height), |p| p.size())
                             } else { (1920, 1080) };
+                            #[cfg(target_os = "ios")]
+                            let input_size = tokio::task::spawn_blocking(move || crate::ios_platform::refresh_size(input_size))
+                                .await.unwrap_or(input_size);
                             let input_size=crate::wayland::input_size(input_size);
                             let source_changed=source_before!=crate::wayland::selected();
                             if source_changed {
@@ -1014,7 +1026,11 @@ impl WebRtcSession {
                                 } else { crate::system_metrics::Permission::Reject };
                                 // Without a desktop (headless/portal before consent) the port-mapping tool still waits
                                 // for ScreenSources/CaptureChange and aborts otherwise: tool peers get a nominal screen.
-                                let screen_size=crate::wayland::input_size(if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) });
+                                let mut screen_size=crate::wayland::input_size(if screen.init_error.is_none() { (screen.width, screen.height) } else { (1920, 1080) });
+                                // The iPad may have rotated since the host started: announce the live size.
+                                #[cfg(target_os = "ios")]
+                                { screen_size = tokio::task::spawn_blocking(move || crate::ios_platform::refresh_size(screen_size))
+                                    .await.unwrap_or(screen_size); }
                                 let messages = [
                                     (8, crate::initialization::encode_capture_change(next_seq(), timestamp, 0, crate::wayland::selected() as i32, &crate::login::desktop_name())),
                                     (13, Ok(crate::initialization::envelope(next_seq(), timestamp, 13, &init_actions.metrics_payload(desktop_sound, desktop_permission)))),

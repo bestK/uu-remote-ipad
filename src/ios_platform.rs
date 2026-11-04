@@ -76,12 +76,24 @@ pub fn lift_memory_limit() {
     log::info!("iPad memory limit: limit_mb={LIMIT_MB} properties_ok={} high_water_ok={}", set == 0, mark == 0);
 }
 
+static ORIENTATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Live screen size and orientation. A connection can start long after the host did, with the
+/// iPad rotated since: never announce the startup geometry.
+pub fn refresh_size(fallback: (u32, u32)) -> (u32, u32) {
+    info().map(|info| (info.width, info.height)).unwrap_or(fallback)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Info { pub width: u32, pub height: u32 }
 
 pub fn info() -> Result<Info, String> {
     let value = with_screen(|s| s.call("info", "[]"))?;
     let json: serde_json::Value = serde_json::from_str(&value).map_err(|e| e.to_string())?;
+    // UIInterfaceOrientation of the captured content; the surface itself stays in portrait pixels.
+    if let Some(orientation) = json.get("status_orientation").and_then(|v| v.as_u64()).filter(|v| (1..=4).contains(v)) {
+        ORIENTATION.store(orientation, std::sync::atomic::Ordering::Relaxed);
+    }
     // UIScreen reports points; the captured IOSurface is in pixels.
     let scale = json.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0).max(1.0);
     let points_w = json.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -185,7 +197,7 @@ fn epoch() -> u64 {
 }
 
 fn signed_in() -> bool {
-    crate::config::file().ok().flatten()
+    crate::config::read_fresh().ok().flatten()
         .and_then(|c| c.get("token").and_then(|t| t.as_str()).map(|t| !t.is_empty())).unwrap_or(false)
 }
 
@@ -294,12 +306,18 @@ pub fn capture_jpeg(quality: f64) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
-pub fn tap(x: f64, y: f64) -> Result<(), String> { note_input(); with_hid(|s| s.call("tap", &format!("[{x},{y}]"))).map(|_| ()) }
-pub fn down(x: f64, y: f64) -> Result<(), String> { note_input(); with_hid(|s| s.call("down", &format!("[{x},{y}]"))).map(|_| ()) }
-pub fn move_to(x: f64, y: f64) -> Result<(), String> { note_input(); with_hid(|s| s.call("move", &format!("[{x},{y}]"))).map(|_| ()) }
-pub fn up(x: f64, y: f64) -> Result<(), String> { note_input(); with_hid(|s| s.call("up", &format!("[{x},{y}]"))).map(|_| ()) }
+fn native_point(x: f64, y: f64) -> (f64, f64) {
+    crate::input_mapping::ios_native_pointer(x, y, ORIENTATION.load(std::sync::atomic::Ordering::Relaxed))
+}
+pub fn tap(x: f64, y: f64) -> Result<(), String> { note_input(); let (x,y) = native_point(x,y); with_hid(|s| s.call("tap", &format!("[{x},{y}]"))).map(|_| ()) }
+pub fn down(x: f64, y: f64) -> Result<(), String> { note_input(); let (x,y) = native_point(x,y); with_hid(|s| s.call("down", &format!("[{x},{y}]"))).map(|_| ()) }
+pub fn move_to(x: f64, y: f64) -> Result<(), String> { note_input(); let (x,y) = native_point(x,y); with_hid(|s| s.call("move", &format!("[{x},{y}]"))).map(|_| ()) }
+pub fn up(x: f64, y: f64) -> Result<(), String> { note_input(); let (x,y) = native_point(x,y); with_hid(|s| s.call("up", &format!("[{x},{y}]"))).map(|_| ()) }
 pub fn swipe(x1: f64, y1: f64, x2: f64, y2: f64, ms: u32) -> Result<(), String> {
     note_input();
+    let orientation = ORIENTATION.load(std::sync::atomic::Ordering::Relaxed);
+    let (x1,y1) = crate::input_mapping::ios_native_pointer(x1,y1,orientation);
+    let (x2,y2) = crate::input_mapping::ios_native_pointer(x2,y2,orientation);
     with_hid(|s| s.call("swipe", &format!("[{x1},{y1},{x2},{y2},{ms}]"))).map(|_| ())
 }
 pub fn home() -> Result<(), String> { with_hid(|s| s.call("home", "[]")).map(|_| ()) }

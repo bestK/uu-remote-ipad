@@ -19,6 +19,17 @@ const CGRelease = new NativeFunction(findExp('CGImageRelease'), 'void', ['pointe
 const CFRelease = new NativeFunction(findExp('CFRelease'), 'void', ['pointer']);
 const uti = CFStr(ptr(0), Memory.allocUtf8String('public.jpeg'), 0x08000100);
 const qKey = CFStr(ptr(0), Memory.allocUtf8String('kCGImageDestinationLossyCompressionQuality'), 0x08000100);
+const orientationKey = findExp('kCGImagePropertyOrientation').readPointer();
+
+function interfaceOrientation() {
+  try { return Number(ObjC.classes.UIApplication.sharedApplication().statusBarOrientation()); } catch (e) { return 1; }
+}
+
+// The SpringBoard IOSurface stays in the physical portrait coordinate space.
+// UIInterfaceOrientation 3/4 correspond to EXIF 8/6 (counterclockwise/clockwise).
+function jpegOrientation(orientation) {
+  return ({ 1: 1, 2: 3, 3: 8, 4: 6 })[orientation] || 1;
+}
 
 function onMain(fn, ms) {
   const box = { done: false, val: null, err: null };
@@ -59,6 +70,7 @@ function capture(q) {
     const md = ObjC.classes.NSMutableData.data();
     const opts = ObjC.classes.NSMutableDictionary.dictionary();
     opts.setObject_forKey_(ObjC.classes.NSNumber.numberWithDouble_(q || 0.55), qKey);
+    opts.setObject_forKey_(ObjC.classes.NSNumber.numberWithInt_(jpegOrientation(interfaceOrientation())), orientationKey);
     const dest = destCreate(md.handle, uti, 1, ptr(0));
     if (dest.isNull()) { CGRelease(cg); CFRelease(surf); throw new Error('no jpeg destination'); }
     destAdd(dest, cg, opts.handle);
@@ -163,7 +175,7 @@ rpc.exports = {
       const sz = b[1] || b.size;
       const w = sz[0] !== undefined ? sz[0] : sz.width;
       const h = sz[1] !== undefined ? sz[1] : sz.height;
-      return { width: w, height: h, scale: s.nativeScale() };
+      return { width: w, height: h, scale: s.nativeScale(), status_orientation: interfaceOrientation() };
     });
   }
 };

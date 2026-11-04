@@ -158,7 +158,9 @@ impl ScreenCapture {
         #[cfg(target_os = "ios")]
         if self.display == "ios:frida" {
             let jpeg = crate::ios_platform::capture_jpeg(0.6)?;
-            return crate::ios_video::decode_jpeg(&jpeg, self.width, self.height);
+            // Rotation swaps the decoded size; the probe buffer follows the live screen.
+            let (width, height) = crate::ios_platform::refresh_size((self.width, self.height));
+            return crate::ios_video::decode_jpeg(&jpeg, width, height);
         }
         let mut buf = self.buffer.lock().unwrap();
         buf.resize(self.width as usize * self.height as usize * 4, 0);
