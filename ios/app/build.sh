@@ -3,7 +3,8 @@
 # too, so another user only installs the IPA and installs the service from the panel's first screen.
 set -e
 cd "$(dirname "$0")"
-APP=build/UURemotePanel.app
+OUT="${1:-build}"
+APP=$OUT/UURemotePanel.app
 SERVICE=$APP/service
 ROOT=$(cd ../.. && pwd)
 HOST=$ROOT/target/aarch64-apple-ios/release/uuremote-server
@@ -24,7 +25,8 @@ if [ ! -f "$FRIDA" ]; then
 fi
 
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-rm -rf build && mkdir -p "$APP" "$SERVICE"
+rm -rf "$APP" "$OUT/Payload"
+mkdir -p "$APP" "$SERVICE"
 xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -fobjc-arc -O2 \
     -isysroot "$SDK" -framework UIKit -framework Foundation -framework QuartzCore \
     -o "$APP/UURemotePanel" main.m
@@ -35,12 +37,13 @@ python3 make-icon.py "$APP"
 cp "$HOST" "$SERVICE/uuremote-server"
 cp "$FRIDA" "$SERVICE/frida-server"
 cp ../install/com.uuremote.host.plist ../install/com.uuremote.frida.plist \
-   ../install/entitlements.plist ../install/install-service.sh "$SERVICE/"
-chmod 755 "$SERVICE/uuremote-server" "$SERVICE/frida-server" "$SERVICE/install-service.sh"
+   ../install/entitlements.plist ../install/install-service.sh ../install/uninstall-service.sh "$SERVICE/"
+chmod 755 "$SERVICE/uuremote-server" "$SERVICE/frida-server" "$SERVICE/install-service.sh" "$SERVICE/uninstall-service.sh"
 chmod 644 "$SERVICE"/*.plist
 
 # Signing happens on the device (Homebrew ldid chokes on this binary): ldid -S entitlements.plist
-rm -rf build/Payload && mkdir -p build/Payload
-cp -R "$APP" build/Payload/
-(cd build && zip -qry UURemotePanel.ipa Payload)
-echo "built: $(pwd)/$APP and UURemotePanel.ipa ($(du -sh build/UURemotePanel.ipa | cut -f1))"
+mkdir -p "$OUT/Payload"
+cp -R "$APP" "$OUT/Payload/"
+rm -f "$OUT/UURemotePanel.ipa"
+(cd "$OUT" && zip -qry UURemotePanel.ipa Payload)
+echo "built: $(pwd)/$APP and $OUT/UURemotePanel.ipa ($(du -sh "$OUT/UURemotePanel.ipa" | cut -f1))"

@@ -22,7 +22,7 @@ static NSString *const kSettingsPath = @"/var/mobile/Library/UURemote/settings.j
 static NSString *const kUnlockStatusPath = @"/private/var/tmp/uu-unlock.txt";
 // The host (root) polls this every 2 s and executes the command it finds.
 static NSString *const kCommandPath = @"/var/mobile/Library/UURemote/command";
-static const NSTimeInterval kInstallTimeout = 60;
+static const NSTimeInterval kServiceTimeout = 60;
 
 static const NSTimeInterval kStaleAfter = 10; // the host rewrites uu-status.json every 3 s
 
@@ -225,12 +225,13 @@ static NSString *ShellQuote(NSString *s) {
     return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
 }
 
-// Runs the bundled install-service.sh through sudo. The password only lives in this command line;
-// it is never written to a file or logged. Returns the last lines of output (password lines removed).
-static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
+// Runs a bundled service script through sudo; the password goes through stdin, never argv or a file.
+// Returns the last lines of output (password lines removed).
+static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL *success, BOOL *timedOut) {
     *success = NO;
     *timedOut = NO;
-    NSString *script = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"service/install-service.sh"];
+    NSString *script = [[[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"service"]
+        stringByAppendingPathComponent:scriptName];
     // The password goes through stdin, never argv: another process could read it from `ps`.
     NSString *command = [NSString stringWithFormat:@"exec sudo -S sh %@ 2>&1", ShellQuote(script)];
     NSString *shell = [[NSFileManager defaultManager] isExecutableFileAtPath:@"/var/jb/bin/sh"] ? @"/var/jb/bin/sh" : @"/bin/sh";
@@ -243,8 +244,8 @@ static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
     for (NSUInteger i = 0; i < envStrings.count; i++) envp[i] = strdup(envStrings[i].UTF8String);
 
     int fds[2], stdinPipe[2];
-    if (pipe(fds) != 0) { free(envp); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
-    if (pipe(stdinPipe) != 0) { close(fds[0]); close(fds[1]); free(envp); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
+    if (pipe(fds) != 0) { free(envp); return T(@"无法启动服务管理进程", @"Couldn't start service management"); }
+    if (pipe(stdinPipe) != 0) { close(fds[0]); close(fds[1]); free(envp); return T(@"无法启动服务管理进程", @"Couldn't start service management"); }
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, stdinPipe[0], 0);
@@ -267,7 +268,7 @@ static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
     free(envp);
     close(fds[1]);
     close(stdinPipe[0]);
-    if (rc != 0) { close(fds[0]); close(stdinPipe[1]); return T(@"无法启动安装进程", @"Couldn't start the installer"); }
+    if (rc != 0) { close(fds[0]); close(stdinPipe[1]); return T(@"无法启动服务管理进程", @"Couldn't start service management"); }
     {
         NSString *line = [password stringByAppendingString:@"\n"];
         const char *bytes = line.UTF8String;
@@ -281,7 +282,7 @@ static NSString *RunInstall(NSString *password, BOOL *success, BOOL *timedOut) {
     close(stdinPipe[1]);
 
     NSMutableData *out = [NSMutableData data];
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kInstallTimeout];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kServiceTimeout];
     for (;;) {
         double left = [deadline timeIntervalSinceNow];
         if (left <= 0) { *timedOut = YES; break; }
@@ -471,6 +472,10 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) UIStackView *qrGroup;
 @property(nonatomic) UIImageView *qrView;
 @property(nonatomic) NSDate *qrModified;
+@property(nonatomic) NSDictionary *qrBeforeRequest;
+@property(nonatomic) NSDate *loginDeadline;
+@property(nonatomic) UIButton *refreshLoginButton;
+@property(nonatomic) BOOL requestingLogin;
 // Account
 @property(nonatomic) UIView *accountCard;
 @property(nonatomic) UIView *accountAvatar;
@@ -479,6 +484,10 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) UILabel *accountLabel;
 @property(nonatomic) UIButton *logoutButton;
 @property(nonatomic) BOOL loggingOut;
+@property(nonatomic) NSDate *logoutDeadline;
+@property(nonatomic) BOOL signedIn;
+@property(nonatomic) BOOL hostAvailable;
+@property(nonatomic) UILabel *accountResult;
 // Service install
 @property(nonatomic) UIView *installCard;
 @property(nonatomic) UIView *installSection;
@@ -490,6 +499,11 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) UILabel *installOutput;
 @property(nonatomic) BOOL installing;
 @property(nonatomic) BOOL installFinished;
+// Service uninstall
+@property(nonatomic) UIButton *uninstallButton;
+@property(nonatomic) UILabel *uninstallResult;
+@property(nonatomic) UILabel *uninstallOutput;
+@property(nonatomic) BOOL uninstalling;
 // Auto-unlock
 @property(nonatomic) UIView *unlockCard;
 @property(nonatomic) UIView *unlockStatusPill;
@@ -532,7 +546,8 @@ static UIColor *SubtleDividerColor(void) {
             sections:@[[self insetSection:status], self.installSection, [self insetSection:self.accountCard],
                 [self insetSection:[self historyCard]]]],
         [self pageWithTitle:T(@"安全", @"Security") tab:T(@"安全", @"Security") symbol:@"lock.shield"
-            sections:@[[self insetSection:self.unlockCard], [self insetSection:[self lockCard]]]],
+            sections:@[[self insetSection:self.unlockCard], [self insetSection:[self lockCard]],
+                [self insetSection:[self serviceCard]]]],
         [self pageWithTitle:T(@"快捷键", @"Shortcuts") tab:T(@"快捷键", @"Shortcuts") symbol:@"keyboard"
             sections:@[[self insetSection:[self shortcutsCard]]]],
     ];
@@ -830,10 +845,12 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
         [self.qrView.widthAnchor constraintEqualToConstant:200],
         [self.qrView.heightAnchor constraintEqualToConstant:200],
     ]];
-    self.qrGroup = [[UIStackView alloc] initWithArrangedSubviews:@[self.qrView]];
+    self.refreshLoginButton = [self buttonWithTitle:T(@"刷新二维码", @"Refresh QR Code") bold:NO action:@selector(refreshLogin)];
+    self.refreshLoginButton.tintColor = HeroPrimaryTextColor();
+    self.qrGroup = [[UIStackView alloc] initWithArrangedSubviews:@[self.qrView, self.refreshLoginButton]];
     self.qrGroup.axis = UILayoutConstraintAxisVertical;
     self.qrGroup.alignment = UIStackViewAlignmentCenter;
-    self.qrGroup.spacing = 0;
+    self.qrGroup.spacing = 8;
     self.qrGroup.hidden = YES;
     [stack addArrangedSubview:self.qrGroup];
     [stack setCustomSpacing:22 afterView:self.qrGroup];
@@ -905,13 +922,23 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     metaStack.axis = UILayoutConstraintAxisVertical;
     metaStack.spacing = 2;
 
-    self.logoutButton = [self pillSecondaryButtonWithTitle:T(@"退出登录", @"Sign Out") destructive:YES action:@selector(confirmLogout)];
+    self.logoutButton = [self pillSecondaryButtonWithTitle:T(@"退出登录", @"Sign Out") destructive:YES action:@selector(accountAction)];
+    __weak PanelController *weakSelf = self;
+    self.logoutButton.configurationUpdateHandler = ^(UIButton *button) {
+        UIButtonConfiguration *cfg = button.configuration;
+        cfg.baseBackgroundColor = SecondaryPillFillColor(weakSelf.signedIn);
+        cfg.baseForegroundColor = SecondaryPillTextColor(weakSelf.signedIn, button.enabled);
+        button.configuration = cfg;
+    };
     UIView *spacer = [[UIView alloc] init];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.accountAvatar, metaStack, spacer, self.logoutButton]];
     row.spacing = 14;
     row.alignment = UIStackViewAlignmentCenter;
     [row.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
     [stack addArrangedSubview:row];
+    self.accountResult = Label(UIFontTextStyleFootnote, NO, [UIColor systemRedColor]);
+    self.accountResult.hidden = YES;
+    [stack addArrangedSubview:self.accountResult];
     return card;
 }
 
@@ -989,6 +1016,23 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
 }
 
 #pragma mark - Security
+
+- (UIView *)serviceCard {
+    UIStackView *stack;
+    UIView *card = [self cardWithStack:&stack];
+    [stack addArrangedSubview:[self cardTitle:T(@"宿主服务", @"Host Service")]];
+    self.uninstallButton = [self pillSecondaryButtonWithTitle:T(@"卸载宿主服务", @"Uninstall Host Service")
+        destructive:YES action:@selector(confirmUninstall)];
+    [self.uninstallButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [stack addArrangedSubview:self.uninstallButton];
+    self.uninstallResult = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    self.uninstallResult.hidden = YES;
+    [stack addArrangedSubview:self.uninstallResult];
+    self.uninstallOutput = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    self.uninstallOutput.hidden = YES;
+    [stack addArrangedSubview:self.uninstallOutput];
+    return card;
+}
 
 - (UIView *)unlockCardView {
     UIStackView *stack;
@@ -1322,6 +1366,15 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
 
 #pragma mark - Account
 
+- (void)accountAction {
+    if (!self.logoutButton.enabled) return;
+    if (self.signedIn) { [self confirmLogout]; return; }
+    self.selectedIndex = 0;
+    UIScrollView *scroll = self.scrollViews.firstObject;
+    CGRect r = [self.statusPlate convertRect:self.statusPlate.bounds toView:scroll];
+    [scroll scrollRectToVisible:r animated:!UIAccessibilityIsReduceMotionEnabled()];
+}
+
 - (void)confirmLogout {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:T(@"退出登录？", @"Sign out?")
         message:nil
@@ -1333,37 +1386,110 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
 }
 
 - (void)logout {
-    if (!WritePrivate(kCommandPath, [@"logout\n" dataUsingEncoding:NSUTF8StringEncoding])) return;
-    self.loggingOut = YES;
-    [self refresh];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.loggingOut = NO;
+    if (!self.signedIn || self.loggingOut || self.installing || self.uninstalling) return;
+    if (!WritePrivate(kCommandPath, [@"logout\n" dataUsingEncoding:NSUTF8StringEncoding])) {
+        self.accountResult.text = T(@"退出请求失败，请重试", @"Couldn't request sign-out; try again");
         [self refresh];
-    });
+        return;
+    }
+    self.loggingOut = YES;
+    self.logoutDeadline = [NSDate dateWithTimeIntervalSinceNow:90];
+    self.qrBeforeRequest = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    self.accountResult.text = @"";
+    self.qrView.image = nil;
+    self.qrModified = nil;
+    [self refresh];
+}
+
+- (void)refreshLogin {
+    if (!self.hostAvailable || self.signedIn || self.loggingOut || self.requestingLogin || self.installing || self.uninstalling) return;
+    if (!WritePrivate(kCommandPath, [@"refresh-login\n" dataUsingEncoding:NSUTF8StringEncoding])) {
+        self.accountResult.text = T(@"刷新请求失败，请重试", @"Couldn't request a new QR code; try again");
+        [self refresh];
+        return;
+    }
+    self.requestingLogin = YES;
+    self.qrBeforeRequest = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    self.loginDeadline = [NSDate dateWithTimeIntervalSinceNow:90];
+    self.accountResult.text = @"";
+    self.qrView.image = nil;
+    self.qrModified = nil;
+    [self refresh];
 }
 
 #pragma mark - Service install
 
 - (void)installService {
-    if (self.installing) return;
+    if (self.installing || self.uninstalling) return;
     NSString *password = self.installPassword.length ? [self.installPassword copy] : @"123";
     [self.installPassword setString:@""];
     self.installField.text = @"";
     [self.installField resignFirstResponder];
-    self.installing = YES;
+    [self runServiceOperation:NO password:password];
+}
+
+- (void)confirmUninstall {
+    if (self.installing || self.uninstalling) return;
+    [self dismissKeyboard];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:T(@"卸载宿主服务？", @"Uninstall host service?")
+        message:T(@"远程连接将断开，宿主及其启动项将移除。保留登录、设置、记录与 Frida 程序。",
+            @"Remote connections will close and the host and its launch jobs will be removed. Sign-in, settings, history and the Frida binary are kept.")
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak UIAlertController *weakAlert = alert;
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = T(@"Root / Sudo 密码（默认 123）", @"Root / Sudo Password (default 123)");
+        field.accessibilityLabel = field.placeholder;
+        field.secureTextEntry = YES;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        field.textContentType = UITextContentTypeOneTimeCode;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:T(@"取消", @"Cancel") style:UIAlertActionStyleCancel
+        handler:^(UIAlertAction *a) { weakAlert.textFields.firstObject.text = @""; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:T(@"卸载", @"Uninstall") style:UIAlertActionStyleDestructive
+        handler:^(UIAlertAction *a) {
+            UITextField *field = weakAlert.textFields.firstObject;
+            NSString *password = field.text.length ? [field.text copy] : @"123";
+            field.text = @"";
+            [self runServiceOperation:YES password:password];
+        }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)runServiceOperation:(BOOL)uninstall password:(NSString *)password {
+    if (self.installing || self.uninstalling) return;
+    self.installing = !uninstall;
+    self.uninstalling = uninstall;
     self.installFinished = NO;
+    self.uninstallResult.text = @"";
+    self.uninstallOutput.text = @"";
     [self refresh];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL ok, timedOut;
-        NSString *output = RunInstall(password, &ok, &timedOut);
+        NSString *output = RunServiceScript(uninstall ? @"uninstall-service.sh" : @"install-service.sh", password, &ok, &timedOut);
         dispatch_async(dispatch_get_main_queue(), ^{
             self.installing = NO;
-            self.installFinished = YES;
-            NSString *statusWord = ok ? T(@"安装完成", @"installed")
-                : timedOut ? T(@"安装超时", @"timed out") : T(@"安装失败", @"failed");
-            self.installResult.text = [NSString stringWithFormat:@"$ status: %@", statusWord];
-            self.installResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
-            self.installOutput.text = output;
+            self.uninstalling = NO;
+            NSString *statusWord;
+            if (uninstall) {
+                statusWord = ok ? T(@"卸载完成", @"Uninstalled")
+                    : timedOut ? T(@"卸载超时，请重试", @"Uninstall timed out; try again")
+                    : T(@"卸载失败，请重试", @"Uninstall failed; try again");
+                self.uninstallResult.text = statusWord;
+                self.uninstallResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+                self.uninstallOutput.text = output;
+                if (ok) {
+                    [self.installPassword setString:@""];
+                    self.installField.text = @"";
+                }
+            } else {
+                self.installFinished = YES;
+                statusWord = ok ? T(@"安装完成", @"installed")
+                    : timedOut ? T(@"安装超时", @"timed out") : T(@"安装失败", @"failed");
+                self.installResult.text = [NSString stringWithFormat:@"$ status: %@", statusWord];
+                self.installResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+                self.installOutput.text = output;
+            }
             [self refresh];
         });
     });
@@ -1449,9 +1575,11 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
             detail = [NSString stringWithFormat:T(@"%ld 个连接", @"%ld connected"), (long)viewers];
             symbol = @"dot.radiowaves.left.and.right"; break;
         case HostWaiting:
-            text = T(@"等待扫码", @"Sign In");
+            text = self.loggingOut ? T(@"正在退出…", @"Signing Out…")
+                : self.qrView.image ? T(@"等待扫码", @"Sign In") : T(@"正在加载二维码…", @"Loading QR Code…");
             badge = T(@"扫码登录", @"SCAN QR");
-            detail = T(@"未登录", @"Not signed in");
+            detail = self.qrView.image ? T(@"手机扫码登录", @"Scan to sign in")
+                : T(@"未登录", @"Not signed in");
             symbol = @"qrcode"; break;
         case HostOnline:
             text = T(@"已上线", @"Online");
@@ -1492,12 +1620,45 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     NSDictionary *status = ReadJSONDict(kStatusJSONPath);
     NSArray<NSDictionary *> *history = ReadHistory();
 
+    self.hostAvailable = status && [[NSDate date] timeIntervalSince1970] - Number(status[@"updated"]) <= kStaleAfter;
+    BOOL wasSignedIn = self.signedIn;
+    self.signedIn = self.hostAvailable && [status[@"signed_in"] boolValue];
+    if (self.signedIn && !wasSignedIn) self.accountResult.text = @"";
+    if (self.loggingOut) {
+        if ([loginStatus isEqualToString:@"error-logout"] && ![[NSFileManager defaultManager] fileExistsAtPath:kCommandPath]) {
+            self.loggingOut = NO;
+            self.accountResult.text = T(@"退出失败，请重试", @"Sign-out failed; try again");
+        } else if (self.hostAvailable && !self.signedIn) {
+            self.loggingOut = NO;
+            self.requestingLogin = YES;
+            self.loginDeadline = [NSDate dateWithTimeIntervalSinceNow:90];
+        } else if (self.logoutDeadline.timeIntervalSinceNow <= 0) {
+            self.loggingOut = NO;
+            self.accountResult.text = T(@"退出超时，请重试", @"Sign-out timed out; try again");
+        }
+    }
+    if (!self.signedIn && ([loginStatus isEqualToString:@"qr-error"] || [loginStatus isEqualToString:@"qr-expired"])
+        && ![[NSFileManager defaultManager] fileExistsAtPath:kCommandPath]) {
+        self.requestingLogin = NO;
+        self.accountResult.text = [loginStatus isEqualToString:@"qr-expired"]
+            ? T(@"二维码已失效，请刷新", @"QR code expired; refresh to retry")
+            : T(@"二维码加载失败，请刷新", @"Couldn't load QR code; refresh to retry");
+    }
+    if (self.signedIn && !self.loggingOut) {
+        self.requestingLogin = NO;
+        self.qrBeforeRequest = nil;
+    } else if (self.requestingLogin && self.loginDeadline.timeIntervalSinceNow <= 0) {
+        self.requestingLogin = NO;
+        self.accountResult.text = T(@"二维码加载超时，请刷新", @"QR code loading timed out; refresh to retry");
+    }
+
     HostState state;
-    if (!status || [[NSDate date] timeIntervalSince1970] - Number(status[@"updated"]) > kStaleAfter) state = HostDown;
+    if (!self.hostAvailable && !self.loggingOut && !self.requestingLogin) state = HostDown;
+    else if (self.loggingOut || !self.signedIn) state = HostWaiting;
     else if (Number(status[@"viewers"]) > 0) state = HostActive;
-    else if ([loginStatus isEqualToString:@"waiting-scan"]) state = HostWaiting;
     else state = HostOnline;
 
+    [self refreshQR:state == HostWaiting && !self.loggingOut];
     [self displayState:state viewers:(NSInteger)Number(status[@"viewers"])];
 
     NSDictionary *last = history.lastObject;
@@ -1506,11 +1667,13 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
               WhenText([NSDate dateWithTimeIntervalSince1970:Number(last[@"at"])]), DurationText(Number(last[@"duration_s"]))]
         : T(@"暂无连接记录", @"No sessions yet"));
 
-    [self refreshQR:state == HostWaiting];
-    [self refreshAccount:[status[@"signed_in"] boolValue]];
+    [self refreshAccount:self.signedIn];
     // roothide hides /var/jb from an app, so the daemon binary cannot be probed by path: a fresh
     // status file means the service is installed and running.
     [self refreshInstall:state != HostDown];
+    self.refreshLoginButton.enabled = self.hostAvailable && !self.loggingOut && !self.requestingLogin
+        && !self.installing && !self.uninstalling;
+    SetHidden(self.accountResult, self.accountResult.text.length == 0);
     [self refreshUnlock];
 
     BOOL lockAfter = [ReadJSONDict(kSettingsPath)[@"lock_after_session"] boolValue];
@@ -1523,14 +1686,15 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     SetText(self.accountLabel, signedIn ? T(@"已登录", @"Signed in") : T(@"未登录", @"Signed out"));
     self.accountAvatar.backgroundColor = signedIn ? PrimaryActionFillColor() : FieldFillColor();
     self.accountSymbol.tintColor = signedIn ? [UIColor whiteColor] : [UIColor tertiaryLabelColor];
-    NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…") : T(@"退出登录", @"Sign Out");
+    NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…")
+        : signedIn ? T(@"退出登录", @"Sign Out") : T(@"扫码登录", @"Sign In");
     if (![[self.logoutButton titleForState:UIControlStateNormal] isEqualToString:title]) {
         [UIView performWithoutAnimation:^{
             [self.logoutButton setTitle:title forState:UIControlStateNormal];
             [self.logoutButton layoutIfNeeded];
         }];
     }
-    BOOL enabled = signedIn && !self.loggingOut;
+    BOOL enabled = self.hostAvailable && !self.loggingOut && !self.installing && !self.uninstalling;
     if (self.logoutButton.enabled != enabled) self.logoutButton.enabled = enabled;
 }
 
@@ -1546,23 +1710,48 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
             [self.installButton layoutIfNeeded];
         }];
     }
-    if (self.installButton.enabled != !self.installing) self.installButton.enabled = !self.installing;
-    if (self.installField.enabled != !self.installing) self.installField.enabled = !self.installing;
+    BOOL busy = self.installing || self.uninstalling;
+    if (self.installButton.enabled != !busy) self.installButton.enabled = !busy;
+    if (self.installField.enabled != !busy) self.installField.enabled = !busy;
     SetHidden(self.installResult, !self.installFinished);
     SetHidden(self.installOutput, !self.installFinished || self.installOutput.text.length == 0);
+    NSString *uninstallTitle = self.uninstalling ? T(@"正在卸载…", @"Uninstalling…") : T(@"卸载宿主服务", @"Uninstall Host Service");
+    if (![[self.uninstallButton titleForState:UIControlStateNormal] isEqualToString:uninstallTitle]) {
+        [UIView performWithoutAnimation:^{
+            [self.uninstallButton setTitle:uninstallTitle forState:UIControlStateNormal];
+            [self.uninstallButton layoutIfNeeded];
+        }];
+    }
+    if (self.uninstallButton.enabled != !busy) self.uninstallButton.enabled = !busy;
+    SetHidden(self.uninstallResult, self.uninstallResult.text.length == 0);
+    SetHidden(self.uninstallOutput, self.uninstallOutput.text.length == 0);
 }
 
 - (void)refreshQR:(BOOL)waiting {
     if (!waiting) {
+        self.qrView.image = nil;
+        self.qrModified = nil;
         SetHidden(self.qrGroup, YES);
         return;
     }
-    NSDate *modified = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil].fileModificationDate;
-    if (!(modified == self.qrModified || [modified isEqualToDate:self.qrModified])) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    NSDate *modified = attrs.fileModificationDate;
+    // The daemon atomically replaces the PNG; inode + mtime distinguish a new QR even on coarse clocks.
+    BOOL previousQR = self.qrBeforeRequest && [modified isEqualToDate:self.qrBeforeRequest.fileModificationDate]
+        && [attrs[NSFileSystemFileNumber] isEqual:self.qrBeforeRequest[NSFileSystemFileNumber]];
+    if (previousQR) {
+        self.qrView.image = nil;
+        self.qrModified = nil;
+    } else if (!(modified == self.qrModified || [modified isEqualToDate:self.qrModified])) {
         NSData *png = modified ? [NSData dataWithContentsOfFile:kQRPath] : nil;
         UIImage *image = png.length ? [UIImage imageWithData:png] : nil;
         self.qrView.image = image;
         self.qrModified = image ? modified : nil; // retry next tick if the daemon was mid-write
+        if (image) {
+            self.requestingLogin = NO;
+            self.qrBeforeRequest = nil;
+            self.accountResult.text = @"";
+        }
     }
     SetHidden(self.qrView, self.qrView.image == nil);
     SetHidden(self.qrGroup, NO);

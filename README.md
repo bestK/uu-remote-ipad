@@ -9,7 +9,7 @@
 > 现在还附带一个**实验性 Linux 控制端** `uuremote-viewer`：在 Linux 上用 UU 账号远控官方 Windows / Mac 被控端或本项目主机
 > （桌面、文件传输、终端、端口映射、远程协助，详见[下文](#实验性原生控制端uuremote-viewer)）。
 > 越狱的 **iPad** 也能当被控端：宿主直接跑在 iPad 上，官方客户端照常连接（见 [ios/README.md](ios/README.md)）。
-> iPad 面板采用 28pt 大圆角卡片与底部悬浮胶囊切换栏（「连接 / 安全 / 快捷键」），浅色配荧光青柠状态胶囊、深色配电光蓝星芒主卡；后台协议不变。
+> iPad 面板采用 28pt 大圆角卡片与底部悬浮胶囊切换栏（「连接 / 安全 / 快捷键」），浅色配荧光青柠状态胶囊、深色配电光蓝星芒主卡；后台协议不变。退出登录后可在 App 内重新扫码，并支持刷新二维码；iPad 后台的扫码长轮询超时后保持原码继续等待。「安全 → 宿主服务」支持确认并输入 sudo 密码后卸载，保留登录、设置、记录与共享的 Frida 程序。
 > 没有桌面的**群晖 / NAS** 也能用 Docker 部署：[部署指南](docs/deploy-nas-docker.md)，镜像 [`ghcr.io/vallierdev/uu-remote-linux`](https://github.com/VallierDev/uu-remote-linux/pkgs/container/uu-remote-linux)。
 >
 > 这是个人兴趣项目，**与网易无关，也不是官方客户端**。如果网易认为本项目侵权或有不妥，

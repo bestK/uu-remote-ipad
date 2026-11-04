@@ -34,6 +34,23 @@ assert count == 9, "路径常量数量变化，请先审查隔离范围"
 # 语言固定只存在于测试副本，发布代码仍跟随系统语言。
 source = source.replace('[[NSLocale preferredLanguages].firstObject hasPrefix:@"zh"]',
                         "YES" if args.language == "zh" else "NO")
+# 所有提权操作在测试副本中替换为可控结果；原始进程运行器仍由下面的 iOS 编译检查覆盖。
+start = source.index("static NSString *RunServiceScript(")
+end = source.index("typedef NS_ENUM(NSInteger, HostState)", start)
+source = source[:start] + '''static BOOL fixtureServiceOK = YES, fixtureServiceTimeout = NO;
+static NSString *fixtureServiceScript;
+static BOOL fixtureDefaultPassword;
+static NSUInteger fixtureServiceCalls;
+static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL *success, BOOL *timedOut) {
+    fixtureServiceCalls++;
+    fixtureServiceScript = scriptName;
+    fixtureDefaultPassword = [password isEqualToString:@"123"];
+    *success = fixtureServiceOK;
+    *timedOut = fixtureServiceTimeout;
+    return @"synthetic service result";
+}
+
+''' + source[end:]
 (work / "PanelUnderTest.m").write_text(source)
 sdk = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
 run("xcrun", "--sdk", "iphoneos", "clang", "-arch", "arm64",

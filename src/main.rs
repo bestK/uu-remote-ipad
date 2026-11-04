@@ -20,6 +20,8 @@ mod config;
 mod i18n;
 mod login;
 mod login_ui;
+#[cfg(any(target_os = "ios", test))]
+mod ios_login;
 mod session_lock;
 mod capture;
 mod kms;
@@ -404,17 +406,26 @@ fn show_running_host() -> Result<(), Box<dyn std::error::Error>> {
 /// for the home-screen panel app to display.
 #[cfg(target_os = "ios")]
 async fn run_ios_login() -> Credentials {
-    std::env::set_var("UU_LOGIN_QR_PNG", "/private/var/tmp/uu-qr.png");
+    std::env::set_var("UU_LOGIN_QR_PNG", ios_login::QR_PATH);
     loop {
+        if let Err(e) = ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH)) {
+            log::warn!("Cannot clear old QR: {e}");
+            let _ = std::fs::write("/private/var/tmp/uu-status.txt", "qr-error\n");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        }
         let _ = std::fs::write("/private/var/tmp/uu-status.txt", "waiting-scan\n");
         let ui = login_ui::LoginUi::attached();
         match login::flow(&ui).await {
             Ok(_) => {
+                let _ = ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH));
                 let _ = std::fs::write("/private/var/tmp/uu-status.txt", "logged-in\n");
                 log::info!("QR login completed; restarting to pick up the new credentials");
                 std::process::exit(0); // launchd restarts the host, now with the token
             }
             Err(error) => {
+                let _ = ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH));
+                let _ = std::fs::write("/private/var/tmp/uu-status.txt", "qr-error\n");
                 log::warn!("QR login failed: {error}; retrying");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
@@ -431,21 +442,44 @@ fn watch_panel_commands() {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let path = "/var/mobile/Library/UURemote/command";
             let Ok(text) = std::fs::read_to_string(path) else { continue };
-            if text.trim() != "logout" { continue; }
+            let command = text.trim();
+            if command != "logout" && command != "refresh-login" { continue; }
             let _ = std::fs::remove_file(path);
-            log::info!("Panel requested sign-out");
-            if let Ok((_, creds)) = crate::login::prepare_device().await {
-                match UUAuthClient::new(creds).post_json("/api/v1/user/logout", &serde_json::json!({})).await {
-                    Ok((status, _)) => log::info!("Cloud sign-out answered: http_status={status}"),
-                    Err(error) => log::warn!("Cloud sign-out failed: {error}"),
-                }
+            if command == "refresh-login" {
+                let Ok(cfg) = crate::config::read_fresh() else { continue };
+                if std::env::var("UU_TOKEN").ok().is_some_and(|t| !t.is_empty())
+                    || cfg.as_ref().is_some_and(|c| c.get("token").and_then(|t| t.as_str()).is_some_and(|t| !t.is_empty())) { continue; }
+                if ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH)).is_err() { continue; }
+                let _ = std::fs::write("/private/var/tmp/uu-status.txt", "waiting-scan\n");
+                std::process::exit(0);
             }
-            if let Ok(Some(cfg)) = crate::config::file() {
-                let mut cfg = cfg.clone();
-                if let Some(fields) = cfg.as_object_mut() {
-                    for key in ["token", "csrf", "user_id"] { fields.remove(key); }
+            let _ = std::fs::write("/private/var/tmp/uu-status.txt", "signing-out\n");
+            log::info!("Panel requested sign-out");
+            let result = (|| -> Result<Option<Credentials>, String> {
+                if ["UU_TOKEN", "UU_USER_ID", "UU_CSRF"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty())) {
+                    return Err("account credentials are supplied by the environment".into());
                 }
-                let _ = crate::login::write_config(&cfg);
+                let mut cfg = crate::config::read_fresh()?.unwrap_or_else(|| serde_json::json!({}));
+                let creds = Credentials::load(Some(&cfg)).ok();
+                ios_login::clear_account(&mut cfg)?;
+                crate::login::write_config(&cfg)?;
+                ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH)).map_err(|e| e.to_string())?;
+                Ok(creds)
+            })();
+            let creds = match result {
+                Ok(creds) => creds,
+                Err(error) => {
+                    log::warn!("Local sign-out failed: {error}");
+                    let _ = std::fs::write("/private/var/tmp/uu-status.txt", "error-logout\n");
+                    continue;
+                }
+            };
+            let _ = std::fs::write("/private/var/tmp/uu-status.txt", "logged-out\n");
+            if let Some(creds) = creds {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), UUAuthClient::new(creds).post_json("/api/v1/user/logout", &serde_json::json!({}))).await {
+                    Ok(Ok((status, _))) => log::info!("Cloud sign-out answered: http_status={status}"),
+                    _ => log::warn!("Cloud sign-out failed or timed out"),
+                }
             }
             log::info!("Signed out; restarting to show a new QR code");
             std::process::exit(0);
@@ -471,6 +505,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "ios")]
     {
         ios_platform::lift_memory_limit();
+        if let Err(error) = ios_login::clear_qr(std::path::Path::new(ios_login::QR_PATH)) {
+            log::warn!("Cannot clear old QR at startup: {error}");
+        }
         ios_platform::start_status_writer();
         watch_panel_commands();
     }
