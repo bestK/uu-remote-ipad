@@ -177,5 +177,25 @@ rpc.exports = {
       const h = sz[1] !== undefined ? sz[1] : sz.height;
       return { width: w, height: h, scale: s.nativeScale(), status_orientation: interfaceOrientation() };
     });
+  },
+  // Diagnostics: every orientation source SpringBoard exposes (enum values only).
+  orientationdebug: function () {
+    return onMain(function () {
+      const out = {};
+      const tryNum = function (key, f) { try { out[key] = Number(f()); } catch (e) { out[key] = 'err'; } };
+      const sb = ObjC.classes.SpringBoard.sharedApplication();
+      tryNum('status', function () { return sb.statusBarOrientation(); });
+      tryNum('active', function () { return sb.activeInterfaceOrientation(); });
+      tryNum('device', function () { return ObjC.classes.UIDevice.currentDevice().orientation(); });
+      try {
+        const scenes = ObjC.classes.UIApplication.sharedApplication().connectedScenes().allObjects();
+        out.scenes = [];
+        for (let i = 0; i < scenes.count(); i++) {
+          const sc = scenes.objectAtIndex_(i);
+          try { out.scenes.push(Number(sc.interfaceOrientation())); } catch (e) { out.scenes.push('err'); }
+        }
+      } catch (e) { out.scenes = 'err'; }
+      return out;
+    });
   }
 };

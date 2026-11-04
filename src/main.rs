@@ -218,8 +218,9 @@ pub(crate) fn cli_pref_ok(which: &str, value: &str) -> bool {
     }
 }
 
-const SUBCOMMANDS: [&str; 23] = ["privacy-guard", "privacy-wallpaper", "privacy-screen-probe", "doctor", "show", "assist", "set-encoder", "set-codec", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
-    "wayland-input-probe", "wayland-text-probe", "clipboard-acceptance", "portal-acceptance", "ios-video-probe", "ios-input-probe", "ios-key-probe"];
+const SUBCOMMANDS: [&str; 24] = ["privacy-guard", "privacy-wallpaper", "privacy-screen-probe", "doctor", "show", "assist", "set-encoder", "set-codec", "desktop-input-probe", "virtual-audio-probe", "login", "unlock-check", "desktop-probe", "desktop-video-probe", "desktop-audio-probe", "wayland-capture",
+    "wayland-input-probe", "wayland-text-probe", "clipboard-acceptance", "portal-acceptance", "ios-video-probe", "ios-input-probe", "ios-key-probe",
+    "ios-orientation-probe"];
 
 /// Unknown arguments and illegal set-encoder / set-codec values exit 2 (never start a second host).
 /// help / -h / --help exit 0 so main prints usage instead of starting the host.
@@ -702,6 +703,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("backend={:?} width={} height={} frame_bytes={}",screen.backend,screen.width,screen.height,frame.len());
         return Ok(());
+    }
+    // What a new desktop stream would encode: live size, interface orientation and the decoded
+    // frame (rotated by the capture agent). Sizes and enum values only, no picture is kept.
+    if std::env::args().nth(1).as_deref() == Some("ios-orientation-probe") {
+        #[cfg(target_os = "ios")]
+        {
+            let screen = ScreenCapture::new()?;
+            let frame = screen.capture_frame()?;
+            let (w, h) = ios_platform::refresh_size((screen.width, screen.height));
+            let layout = |w: u32, h: u32| if w > h { "landscape" } else { "portrait" };
+            println!("orientation={} screen={}x{} ({}) frame_bytes={} frame_matches_screen={}",
+                ios_platform::orientation(), w, h, layout(w, h), frame.len(), frame.len() == w as usize * h as usize * 4);
+            if std::env::var_os("UU_PROBE_DEBUG").is_some() { println!("sources={:?}", ios_platform::orientation_debug()); }
+            return Ok(());
+        }
+        #[cfg(not(target_os = "ios"))]
+        return Err("ios-orientation-probe is iOS only".into());
     }
     if std::env::args().nth(1).as_deref() == Some("ios-input-probe") {
         #[cfg(target_os = "ios")]

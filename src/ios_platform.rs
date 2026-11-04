@@ -78,6 +78,12 @@ pub fn lift_memory_limit() {
 
 static ORIENTATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Interface orientation of the captured content (UIInterfaceOrientation, 1..=4).
+pub fn orientation() -> u64 { ORIENTATION.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Diagnostics: every orientation source SpringBoard exposes (enum values only).
+pub fn orientation_debug() -> Result<String, String> { with_screen(|s| s.call("orientationdebug", "[]")) }
+
 /// Live screen size and orientation. A connection can start long after the host did, with the
 /// iPad rotated since: never announce the startup geometry.
 pub fn refresh_size(fallback: (u32, u32)) -> (u32, u32) {

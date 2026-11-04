@@ -200,6 +200,10 @@ impl DesktopStream {
             let (capture_size, capture_display, portal) = screen.as_ref().map_or(
                 (capture_size, capture_display, portal),
                 |screen| ((screen.width, screen.height), screen.display.clone(), screen.portal.clone()));
+            // iPad: the foreground app decides portrait or landscape; start the encoder in it.
+            #[cfg(target_os = "ios")]
+            let capture_size = tokio::task::spawn_blocking(move || crate::ios_platform::refresh_size(capture_size))
+                .await.unwrap_or(capture_size);
             let state_pc = streaming_pc.clone();
             if let Err(e) = crate::video::stream_desktop_at(streaming_pc, video_track, capture_size, capture_display, portal, settings_rx, settings, idr_request, selection, chroma_sync, reload_at_session).await {
                 // A send racing the viewer's close fails with a misleading track error.
