@@ -41,7 +41,11 @@ cp ../install/com.uuremote.host.plist ../install/com.uuremote.frida.plist \
 chmod 755 "$SERVICE/uuremote-server" "$SERVICE/frida-server" "$SERVICE/install-service.sh" "$SERVICE/uninstall-service.sh"
 chmod 644 "$SERVICE"/*.plist
 
-# Signing happens on the device (Homebrew ldid chokes on this binary): ldid -S entitlements.plist
+# TrollStore keeps the entitlements a binary already carries, so the panel must be signed here:
+# unsigned it would run sandboxed and could not read the host status or run the service scripts.
+# The host is signed on the device by install-service.sh (Homebrew ldid chokes on that binary).
+command -v ldid >/dev/null || { echo "ldid not found (brew install ldid)" >&2; exit 1; }
+ldid -Sentitlements.plist "$APP/UURemotePanel"
 mkdir -p "$OUT/Payload"
 cp -R "$APP" "$OUT/Payload/"
 rm -f "$OUT/UURemotePanel.ipa"

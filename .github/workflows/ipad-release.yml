@@ -17,6 +17,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
+      # build.sh signs the panel with the entitlements TrollStore preserves.
+      - run: brew install ldid
       # Both come from Frida's official release assets, pinned by SHA-256 in the scripts.
       - run: ios/frida/fetch-devkit.sh
       - run: ios/frida/fetch-server.sh
