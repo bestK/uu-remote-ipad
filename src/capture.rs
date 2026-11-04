@@ -92,7 +92,20 @@ impl ScreenCapture {
         // iPad: SpringBoard's screen surface is the "desktop" (frida-core agent).
         #[cfg(target_os = "ios")]
         {
-            let info = crate::ios_platform::info()?;
+            // launchd starts frida-server together with the host (install, reboot): one early
+            // attach would leave the desktop unavailable for the whole run.
+            let mut attempt = 0;
+            let info = loop {
+                match crate::ios_platform::info() {
+                    Ok(info) => break info,
+                    Err(error) if attempt < 30 => {
+                        if attempt == 0 { log::info!("iPad screen not ready yet ({error}); retrying"); }
+                        attempt += 1;
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             log::info!("ScreenCapture initialized (iPad): {}x{}", info.width, info.height);
             return Ok(Self { backend: crate::desktop_backend::DesktopBackend::X11, init_error: None,
                 portal: None, kms: None, display: "ios:frida".into(), width: info.width, height: info.height,
