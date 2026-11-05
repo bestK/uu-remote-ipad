@@ -48,3 +48,34 @@ jobs:
           files: |
             UURemotePanel-*.ipa
             UURemotePanel-*.ipa.sha256
+
+  # Sileo / Zebra source served from GitHub Pages, built from the same IPA.
+  repo:
+    needs: ipa
+    runs-on: macos-15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ipa
+          path: ipa
+      - name: Build APT repository
+        run: |
+          unzip -q ipa/UURemotePanel-*.ipa -d ipa/x
+          sh packaging/ios/build-repo.sh ipa/x/Payload/UURemotePanel.app "${GITHUB_REF_NAME#ipad-v}" site
+          cat site/Release
+      # Creates the Pages site on first run when the token is allowed to.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
