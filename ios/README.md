@@ -131,6 +131,15 @@ sh ios/hud/build-experiment.sh /tmp/uu-indicator-new-build
    Dopamine 用 `/var/jb`，roothide 用 `/var/containers/Bundle/Application/.jbroot-*`（启动项里写入实际路径）。
 4. 装好后卡片消失，状态变成「等待扫码登录」，用手机上的「网易UU远程」扫码即可。
 
+也可以从 Sileo / Zebra 源安装（rootless `iphoneos-arm64`，包名 `com.uuremote.ipad`）：
+
+```
+https://bestk.github.io/uu-remote-ipad/
+```
+
+源里的包内容与 IPA 相同，由 `.github/workflows/ipad-release.yml` 在打 `ipad-v*` 标签时构建并发布到 GitHub Pages；
+`postinst` 调用随包的 `install-service.sh`，`prerm` 调用 `uninstall-service.sh`，与面板的安装按钮走同一条路径。
+
 面板里的「账号」卡片可以退出登录。面板等待后台确认退出后，自动在「连接」页显示新的登录二维码，
 用手机上的「网易UU远程」扫码并确认即可重新登录；「账号」卡片此时改为「扫码登录」，点击回到二维码。
 等待扫码或手机确认期间，以及二维码加载失败或失效时，均可点「刷新二维码」，无需 SSH、重装服务或重新打开 App。
