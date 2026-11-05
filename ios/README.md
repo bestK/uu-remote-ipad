@@ -140,6 +140,10 @@ https://bestk.github.io/uu-remote-ipad/
 源里的包内容与 IPA 相同，由 `.github/workflows/ipad-release.yml` 在打 `ipad-v*` 标签时构建并发布到 GitHub Pages；
 `postinst` 调用随包的 `install-service.sh`，`prerm` 调用 `uninstall-service.sh`，与面板的安装按钮走同一条路径。
 
+发布前需要在仓库里一次性打开 Pages：Settings → Pages → Source 选「GitHub Actions」。
+这一步只能由管理员在网页上完成，工作流的 `GITHUB_TOKEN` 没有创建站点的权限（会报 `Resource not accessible by integration`）。
+打开后重跑失败的 `repo` 作业即可，不必重新打标签。
+
 面板里的「账号」卡片可以退出登录。面板等待后台确认退出后，自动在「连接」页显示新的登录二维码，
 用手机上的「网易UU远程」扫码并确认即可重新登录；「账号」卡片此时改为「扫码登录」，点击回到二维码。
 等待扫码或手机确认期间，以及二维码加载失败或失效时，均可点「刷新二维码」，无需 SSH、重装服务或重新打开 App。

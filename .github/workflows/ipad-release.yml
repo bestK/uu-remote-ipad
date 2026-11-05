@@ -70,10 +70,15 @@ jobs:
           unzip -q ipa/UURemotePanel-*.ipa -d ipa/x
           sh packaging/ios/build-repo.sh ipa/x/Payload/UURemotePanel.app "${GITHUB_REF_NAME#ipad-v}" site
           cat site/Release
-      # Creates the Pages site on first run when the token is allowed to.
-      - uses: actions/configure-pages@v5
+      # Pages must be enabled once by a repo admin (Settings -> Pages -> Source: GitHub Actions);
+      # GITHUB_TOKEN cannot create the site itself, so `enablement` only helps when it already exists.
+      - id: pages
+        uses: actions/configure-pages@v5
         with:
           enablement: true
+      - if: failure() && steps.pages.outcome == 'failure'
+        run: |
+          echo "::error::GitHub Pages is not enabled for this repository. Open https://github.com/$GITHUB_REPOSITORY/settings/pages, set Source to \"GitHub Actions\", then re-run the failed jobs of this run."
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
