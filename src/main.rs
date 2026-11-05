@@ -65,6 +65,8 @@ mod cursor;
 mod frida_bridge;
 #[cfg(target_os = "ios")]
 mod ios_platform;
+#[cfg(any(target_os = "ios", test))]
+mod ios_status;
 #[cfg(target_os = "ios")]
 mod ios_video;
 

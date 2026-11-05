@@ -17,7 +17,8 @@
 - **Touch and keyboard**: mouse clicks and drags become touches, and the computer keyboard types directly; Ctrl/Cmd shortcuts, Home, app switcher, previous app and input-source switching.
 - **Lock screen**: shown as usual; a saved passcode unlocks automatically, and the iPad can lock when the session ends.
 - **Terminal**: the viewer's Terminal opens zsh on the iPad (as `mobile`, with `sudo` available).
-- **Panel app**: "UU 远程" on the home screen installs the service, signs in by QR code and shows the connection state and history.
+- **Panel app**: "UU 远程" on the home screen installs the service, signs in by QR code and shows the connection state and history. The Logs tab supports copying, sharing, clearing the selected log after confirmation, and a draggable scroll thumb. The IPA also declares iPhone support; full on-device acceptance is still pending.
+- **Remote-session overlay**: while a viewer is connected, a small pulsing red dot (notched phones) or a text pill sits in the status bar next to the clock. It ships with the IPA. See the iOS guide.
 
 Requires a jailbreak (verified on Dopamine / roothide, iPadOS 16). Install `UURemotePanel.ipa` with TrollStore or SideStore,
 open the panel and enter the device password to install the service, then scan the QR code with the UU Remote mobile app.

@@ -44,23 +44,25 @@
 
 主屏上的「UU 远程」是唯一的操作入口，中英双语，跟随系统深色模式和字号。界面采用 28pt 连续圆角卡片与底部居中悬浮胶囊栏：
 浅色模式下以暖石灰底配纯白卡片、荧光青柠状态胶囊与纯黑胶囊主按钮；深色模式下以纯碳黑底配电光蓝几何星芒状态主卡、石墨灰卡片与暗红退出胶囊。
-快捷键页左侧是动作、右侧是胶囊键帽，Windows / macOS 分段切换。
+快捷键页左侧是动作、右侧是胶囊键帽，Windows / macOS 分段切换。IPA 同时声明支持 iPhone 和 iPad，并分别提供主屏图标；iPhone 的完整真机验收仍未完成。
 
-- **连接**：运行状态主卡（设备名、状态胶囊、状态副行、最近一次连接摘要）、扫码登录、安装服务、圆形头像账号卡与连接记录。
-- **安全**：自动解锁密码（带状态胶囊与无边框胶囊输入框）、远程结束后锁屏与宿主服务卸载。
+- **连接**：运行状态主卡（设备名、状态胶囊、状态副行、最近一次连接摘要）、扫码登录、安装宿主服务、圆形头像账号卡与连接记录。摘要与列表同源，没有记录时只保留列表空态，不再两处各说一遍。
+- **安全**：自动解锁密码（带状态胶囊与无边框胶囊输入框）、远程结束后锁屏、宿主服务重启与卸载。
 - **快捷键**：Windows / macOS 分段切换，另列底边鼠标手势。
+- **日志**：宿主与 frida-server 日志（最近 256 KB），可刷新、复制、分享；确认并输入 sudo 密码后可清除当前日志（原地清空，不重启服务）；长日志右侧滚动条可直接拖动，支持辅助功能翻页。日志正文中以 `Z` 结尾的时间及导出标题均为 UTC。导出时附面板/宿主版本、系统版本与越狱类型，不含账号信息。
 
 状态真正改变时整块状态主卡短暂溶解；“正在远控”时状态圆形徽章缓慢呼吸；减少动态效果下缩短或关闭转场。
 进入后台停止界面轮询，回到前台立即刷新。
 
 | 卡片 | 作用 |
 |---|---|
-| 状态 | 宿主是否在运行、是否已登录、当前有没有人在远程；未登录时直接显示扫码二维码；下面是最近一次远程的时间和时长 |
-| 安装服务 | 只在服务未安装时出现，输入设备密码一键安装（见下面的安装一节） |
+| 状态 | 新鲜的宿主心跳表示服务运行中、是否已登录及有没有人在远程；心跳不可用时显示「状态不可用」，不推断云端在线状态；未登录时显示扫码二维码 |
+| 安装宿主服务 | 没有可见的启动项和新鲜心跳时显示「安装或修复」，输入设备密码安装；操作会重启后台服务（见下面的安装一节） |
 | 账号 | 已登录时可退出；退出后自动在 App 内显示新二维码，「扫码登录」可回到二维码，「刷新二维码」可重试 |
 | 自动解锁 | 保存锁屏密码，远程连接时自动解锁；显示上次自动解锁成功还是被拒 |
 | 远程结束后锁屏 | 最后一个远程连接结束后自动锁屏 |
-| 宿主服务 | 在「安全」页确认并输入 sudo 密码后卸载；服务离线时也可清理残留 |
+| 宿主服务 | 在「安全」页确认并输入 sudo 密码后重启（`launchctl kickstart -k`，frida-server 先于宿主）或卸载；服务离线时也可清理残留；卸载后（宿主未运行且无启动项）改为「安装宿主服务」 |
+| 日志 | 「日志」页查看 `<越狱根>/var/log/uuremote.log` 与 `frida-server.log`，复制或通过系统分享导出；读不到时重启一次服务即修正权限 |
 | 远程快捷键 | 上面那张按键对照表 |
 | 连接记录 | 最近 5 次远程连接的时间和时长 |
 
@@ -69,10 +71,39 @@
 以及 `/var/mobile/Library/UURemote/` 下的 `unlock.key`、`settings.json`、`command`。这些文件都不含密码以外的个人内容，
 密码只用于解锁，不写入日志。
 
+## 实验：远控悬浮提示
+
+`ios/hud/` 是独立进程，不注入 SpringBoard。它随面板 IPA 一起打包，由 `install-service.sh` 在装宿主服务时一并安装，卸载宿主服务时一并移除。它通过私有 accessibility window hosting 请求系统托管一个不可交互的悬浮提示，与状态栏同一行、位于时间右侧：
+
+- 刘海机型（屏高/屏宽 > 1.9，如 iPhone X）：刘海约占屏宽 53%，左侧只剩约 20pt，显示为红色圆点并缓慢呼吸（1.3 秒一个来回，缩放 1.0↔1.18、透明度 1.0↔0.72）；开启「减弱动态效果」时静态显示。
+- iPad 与非刘海机型：显示文字胶囊「UU 远控中」/「Remote」。
+- 无人远控时隐藏；心跳缺失、两份状态来自不同宿主实例或版本冲突时显示琥珀色「状态未知」，不推断为已结束。
+
+文件、终端和端口映射工具连接不计入；短暂断线仍可能保持连接状态。它不证明视频一定正在传输，也不是系统原生的隐私指示器。
+
+原型使用未经验证的私有 API 和 entitlement，在 iOS 16.7 / roothide 真机上的显示、输入穿透、锁屏、旋转及进程异常后的清理**均未验证**。过去在 SpringBoard 内创建窗口曾让设备进入安全模式；独立进程也不能保证无系统风险。实验程序必须带 `--experimental` 参数，60 秒后退出；另有独立线程在 65 秒时强制结束进程，收到 SIGTERM 或 SpringBoard 重启后 2 秒内也会强制退出。系统级卡死时这些措施同样不能保证生效；不要在重要设备上未经确认启动。它还未与服务安装器、面板开关或开机启动集成。
+
+宿主现在以原子替换方式写 `uu-status.json`，并附带 `status_instance` 和递增的 `status_revision`，悬浮提示按版本号而不是秒级时间排序；直连和 `/rootfs` 两份状态来自不同实例或同版本内容冲突时显示「状态未知」。旧版宿主没有这两个字段，悬浮提示会一直显示「状态未知」。
+
+它作为独立 LaunchDaemon `com.uuremote.indicator` 运行，由 IPA 内的 `install-service.sh` 自动安装（单独重装可用 `sh ios/install/install-indicator.sh <越狱根> <service 目录>`，卸载用 `sh ios/install/uninstall-indicator.sh <越狱根>`）。
+悬浮提示安装失败只打印警告，不会影响宿主服务。daemon 必须从 `.app` 包内启动，否则 UIKit 拿不到 bundle 标识会直接抛异常退出。
+
+已验证：iPhone X / iOS 16.7.15 / roothide 上悬浮窗能跨应用显示在状态栏同一行、时间右侧、不压刘海；无远控时隐藏。该进程在插件环境里只能读到 `/private/var/tmp/uu-status.json`，
+同目录其他文件与 `/rootfs` 一律 ENOENT，所以 `--fixture` 在这台设备上不可用，联调只能靠真实连接。
+
+只构建与运行隔离测试，不连接设备：
+
+```sh
+sh ios/hud/tests/check-state.sh
+python3 -I ios/hud/tests/check-view.py
+sh ios/hud/build-experiment.sh /tmp/uu-indicator-new-build
+```
+
+状态检查使用合成数据；视图截图是 UIKit/Mac Catalyst 合成渲染，不是 iPhone 或 iPad 实机截图。构建路径必须不存在。私有 HUD 托管方式参考 TrollSpeed，许可见 `ios/hud/NOTICE.TrollSpeed`。
+
 ## 已知限制
 
-- 被远程控制时，iPad 状态栏还没有「正在被远控」提示。试过在 SpringBoard 里自建浮层窗口，会把 SpringBoard 弄崩、
-  设备进安全模式，已放弃；需要换一种做法。
+- 正式版目前没有跨应用的「正在被远控」提示；上述实验原型不能作为生产功能依赖。
 - 剪贴板还没有同步。
 - 远控过程中旋转 iPad 或打开竖版 App，画面会立即按新方向输出（主控窗口内可能出现黑边），但官方 Mac 主控只在
   自己发起分辨率变更时调整窗口大小；要得到贴合竖版的窗口，重新连接一次即可。
@@ -93,9 +124,11 @@
 
 1. 设备需要越狱（Dopamine / roothide），frida-server 必须以 root 运行。
 2. 用 TrollStore 或 SideStore 安装 `UURemotePanel.ipa`（构建产物在 `ios/app/build/`）。
-   IPA 里已经带了宿主服务：`uuremote-server`、`frida-server`、两个 LaunchDaemon 配置和安装脚本。
-3. 首次打开「UU 远程」面板，会看到「安装服务」卡片：输入设备密码（Dopamine 默认 `123`），点「安装」。
-   面板通过 sudo 调用随包的 `install-service.sh`，把服务装进系统并启动。
+   IPA 里已经带了宿主服务：`uuremote-server`、同版本的 `frida-server` 与 `frida-agent.dylib`、两个 LaunchDaemon 配置和安装脚本。
+   Frida agent 安装到 `<越狱根>/usr/lib/frida-1.0/frida-agent.dylib`，并提供 `<越狱根>/usr/lib/frida-agent.dylib` 兼容路径（在 iPhone X 的 Frida 17.25 环境中实测需要后者）。缺失时服务仍可能启动、枚举进程，却无法附加；服务诊断分别显示 `frida-agent present=yes/no` 和 `frida-agent-direct present=yes/no`。兼容路径已有不同文件时安装会停止，不覆盖可能由其他工具使用的文件。
+3. 首次打开「UU 远程」面板，会看到「安装宿主服务」卡片：输入设备密码（Dopamine 默认 `123`），点「安装」。
+   面板通过 sudo 调用随包的 `install-service.sh`，把服务装进系统并启动。越狱根目录自动识别：
+   Dopamine 用 `/var/jb`，roothide 用 `/var/containers/Bundle/Application/.jbroot-*`（启动项里写入实际路径）。
 4. 装好后卡片消失，状态变成「等待扫码登录」，用手机上的「网易UU远程」扫码即可。
 
 面板里的「账号」卡片可以退出登录。面板等待后台确认退出后，自动在「连接」页显示新的登录二维码，
@@ -128,7 +161,7 @@ ios/frida/fetch-server.sh
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 IPHONEOS_DEPLOYMENT_TARGET=16.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) UU_NO_GTK=1 \
   cargo build --release --target aarch64-apple-ios --bin uuremote-server
-ios/app/build.sh   # 面板 App + 带服务的 IPA（约 20 MB）
+ios/app/build.sh   # 面板 App + 带服务的 IPA（约 43 MB，含 frida-agent.dylib）
 ```
 
 面板界面的隔离检查（Apple Silicon Mac，Xcode）：
@@ -137,12 +170,16 @@ ios/app/build.sh   # 面板 App + 带服务的 IPA（约 20 MB）
 python3 "ios/app/tests/prepare-native-check.py" --run
 python3 "ios/app/tests/prepare-native-check.py" --language en --run
 python3 -I ios/app/tests/test-uninstall-service.py
+python3 -I ios/app/tests/test-install-agent.py
+python3 -I ios/app/tests/test-clear-log.py
+# 已生成图标的 IPA：检查 iPhone / iPad 声明、图标及其像素尺寸
+python3 -I ios/app/tests/test-panel-package.py ios/app/build/UURemotePanel.ipa
 ```
 
 先以 iOS 15 arm64 编译链接，再使用同一视图的 UIKit/Mac Catalyst 检查程序验证状态、控件与布局。
 每个检查进程限时 60 秒，数据全部来自临时目录，不读取真实账号或密码；安装与卸载进程替换为合成结果，不执行提权。
-中英各 150 项断言，涵盖退出等待、App 内重新扫码与刷新、旧二维码隔离、登录/退出失败与超时，以及卸载确认、忙碌互斥、成功/失败/超时与重新安装；结果和合成数据截图在 `.impeccable/review/`，不进入发布包。
-卸载脚本另有 6 项隔离测试，重定向所有清理路径并模拟 launchctl，覆盖重复卸载、旧版 unload、停止失败与重试、启动项未退出、非 root 和删除失败。
+中英各 227 项断言，涵盖心跳新鲜度与 rootfs 备用视图、退出等待、App 内重新扫码与刷新、不同视图的旧二维码隔离、登录/退出失败与超时、状态不可用时的安装和版本提示，以及卸载确认、忙碌互斥、成功/失败/超时与重新安装、Frida 组件冲突提示、日志 UTC 提示、日志查看与清除、滚动条拖动与辅助功能翻页；结果和合成数据截图在 `.impeccable/review/`，不进入发布包。
+服务脚本另有隔离测试：11 项覆盖卸载、安装和重启；7 项覆盖 Frida agent 双路径、重装更新、其他工具已有文件保护与诊断；6 项覆盖清除日志。测试使用临时目录和模拟命令，不操作真实服务。
 大字号仅覆盖环境类别，不能证明字体放大。
 iPad 的真实字号缩放、安全区、键盘、触摸、VoiceOver 与动态效果仍需模拟器或实机验收。
 

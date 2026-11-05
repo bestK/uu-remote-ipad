@@ -15,6 +15,7 @@ static NSString *const kStatusPath = @"/private/var/tmp/uu-status.txt";
 static NSString *const kQRPath = @"/private/var/tmp/uu-qr.png";
 static NSString *const kStatusJSONPath = @"/private/var/tmp/uu-status.json";
 static NSString *const kHistoryPath = @"/private/var/tmp/uu-history.jsonl";
+static NSString *const kRootfsPrefix = @"/rootfs";
 // Read by the host (root) only to unlock; never leaves the device.
 static NSString *const kPasscodeDir = @"/var/mobile/Library/UURemote";
 static NSString *const kPasscodePath = @"/var/mobile/Library/UURemote/unlock.key";
@@ -169,6 +170,27 @@ static NSDictionary *ReadJSONDict(NSString *path) {
 
 static double Number(id v) { return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : 0; }
 
+static NSString *HostTmpPath(NSString *path, BOOL rootfs) {
+    return rootfs ? [kRootfsPrefix stringByAppendingString:path] : path;
+}
+
+static BOOL HostStatusFresh(NSDictionary *status, NSTimeInterval now) {
+    double updated = Number(status[@"updated"]);
+    return updated > 0 && updated <= now + kStaleAfter && now - updated <= kStaleAfter;
+}
+
+// Some roothide processes see a private /var/tmp; /rootfs exposes the host's shared view.
+static NSDictionary *ReadHostStatus(BOOL *rootfs) {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSDictionary *direct = ReadJSONDict(kStatusJSONPath);
+    if (HostStatusFresh(direct, now)) { *rootfs = NO; return direct; }
+    NSDictionary *alternate = ReadJSONDict(HostTmpPath(kStatusJSONPath, YES));
+    double otherTime = Number(alternate[@"updated"]);
+    *rootfs = HostStatusFresh(alternate, now) || (alternate && otherTime <= now + kStaleAfter
+        && (!direct || otherTime > Number(direct[@"updated"])));
+    return *rootfs ? alternate : direct;
+}
+
 // "今天 15:02" / "Yesterday 15:02" / "3月2日 15:02".
 static NSString *WhenText(NSDate *date) {
     static NSDateFormatter *time, *day;
@@ -196,8 +218,8 @@ static NSString *DurationText(double seconds) {
 }
 
 // Valid history entries, oldest first.
-static NSArray<NSDictionary *> *ReadHistory(void) {
-    NSString *text = [NSString stringWithContentsOfFile:kHistoryPath encoding:NSUTF8StringEncoding error:nil];
+static NSArray<NSDictionary *> *ReadHistory(NSString *path) {
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     NSMutableArray *out = [NSMutableArray array];
     for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
         NSData *data = [Trimmed(line) dataUsingEncoding:NSUTF8StringEncoding];
@@ -225,19 +247,51 @@ static NSString *ShellQuote(NSString *s) {
     return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
 }
 
+static NSString *ExecutableIn(NSString *root, NSArray<NSString *> *names) {
+    for (NSString *name in names) {
+        NSString *p = [root stringByAppendingPathComponent:name];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:p]) return p;
+    }
+    return nil;
+}
+
+// Rootless Dopamine: /var/jb. roothide has no /var/jb; its root is the randomized
+// /var/containers/Bundle/Application/.jbroot-* directory (src/terminal.rs finds the same one from the daemon side).
+static NSString *JailbreakRoot(void) {
+    NSArray *shells = @[@"bin/sh", @"usr/bin/sh"];
+    if (ExecutableIn(@"/var/jb", shells)) return @"/var/jb";
+    NSString *apps = @"/var/containers/Bundle/Application";
+    for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:apps error:nil]) {
+        NSString *root = [apps stringByAppendingPathComponent:name];
+        if ([name hasPrefix:@".jbroot-"] && ExecutableIn(root, shells)) return root;
+    }
+    return nil;
+}
+
 // Runs a bundled service script through sudo; the password goes through stdin, never argv or a file.
 // Returns the last lines of output (password lines removed).
-static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL *success, BOOL *timedOut) {
+static NSString *RunServiceScript(NSString *scriptName, NSString *argument, NSString *password, BOOL *success, BOOL *timedOut) {
     *success = NO;
     *timedOut = NO;
     NSString *script = [[[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"service"]
         stringByAppendingPathComponent:scriptName];
+    NSString *root = JailbreakRoot();
+    // Nothing visible: no supported jailbreak, or the panel is sandboxed (re-signed, e.g. SideStore).
+    if (!root) return T(@"无法启动服务管理进程：找不到越狱环境（/var/jb 或 roothide 的 .jbroot）。需要 Dopamine / roothide，并用 TrollStore 安装 IPA",
+        @"Couldn't start service management: no jailbreak root (/var/jb or roothide .jbroot). Needs Dopamine / roothide and the IPA installed with TrollStore");
+    NSString *shell = ExecutableIn(root, @[@"bin/sh", @"usr/bin/sh"]);
+    NSString *sudo = ExecutableIn(root, @[@"usr/bin/sudo", @"bin/sudo"]) ?: @"sudo";
     // The password goes through stdin, never argv: another process could read it from `ps`.
-    NSString *command = [NSString stringWithFormat:@"exec sudo -S sh %@ 2>&1", ShellQuote(script)];
-    NSString *shell = [[NSFileManager defaultManager] isExecutableFileAtPath:@"/var/jb/bin/sh"] ? @"/var/jb/bin/sh" : @"/bin/sh";
+    // -p '': sudo's prompt has no newline, so its errors would share the prompt's line and be filtered out below.
+    // Absolute shell: sudo's secure_path may not cover roothide's root. The scripts take the root as $1.
+    NSString *command = [NSString stringWithFormat:@"exec %@ -S -p '' %@ %@ %@ %@ 2>&1",
+        ShellQuote(sudo), ShellQuote(shell), ShellQuote(script), ShellQuote(root), ShellQuote(argument ?: @"")];
 
     NSMutableDictionary *env = [[[NSProcessInfo processInfo] environment] mutableCopy];
-    env[@"PATH"] = @"/var/jb/usr/local/bin:/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
+    NSMutableArray<NSString *> *path = [NSMutableArray array];
+    for (NSString *dir in @[@"usr/local/bin", @"usr/bin", @"bin", @"usr/sbin", @"sbin"]) [path addObject:[root stringByAppendingPathComponent:dir]];
+    [path addObjectsFromArray:@[@"/usr/bin", @"/bin", @"/usr/sbin", @"/sbin"]];
+    env[@"PATH"] = [path componentsJoinedByString:@":"];
     NSMutableArray<NSString *> *envStrings = [NSMutableArray array];
     for (NSString *k in env) [envStrings addObject:[NSString stringWithFormat:@"%@=%@", k, env[k]]];
     char **envp = calloc(envStrings.count + 1, sizeof(char *));
@@ -268,7 +322,14 @@ static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL
     free(envp);
     close(fds[1]);
     close(stdinPipe[0]);
-    if (rc != 0) { close(fds[0]); close(stdinPipe[1]); return T(@"无法启动服务管理进程", @"Couldn't start service management"); }
+    if (rc != 0) {
+        close(fds[0]);
+        close(stdinPipe[1]);
+        // EPERM: the sandbox forbids spawning, i.e. the panel lost its entitlements (installed other than via TrollStore).
+        NSString *hint = rc == EPERM ? T(@"面板没有启动进程的权限，请用 TrollStore 安装 IPA", @"the panel may not start processes; install the IPA with TrollStore") : @"";
+        return [NSString stringWithFormat:@"%@ (%@: %s, errno %d)%@%@", T(@"无法启动服务管理进程", @"Couldn't start service management"),
+            shell, strerror(rc), rc, hint.length ? @"\n" : @"", hint];
+    }
     {
         NSString *line = [password stringByAppendingString:@"\n"];
         const char *bytes = line.UTF8String;
@@ -310,7 +371,6 @@ static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL
     for (NSString *raw in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         NSString *line = Trimmed(raw);
         if (!line.length) continue;
-        if ([line rangeOfString:@"password" options:NSCaseInsensitiveSearch].location != NSNotFound) continue;
         if ([line rangeOfString:@"[sudo]"].location != NSNotFound) continue;
         if (password.length && [line rangeOfString:password].location != NSNotFound) continue;
         [lines addObject:line];
@@ -320,6 +380,7 @@ static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL
 }
 
 typedef NS_ENUM(NSInteger, HostState) { HostDown, HostActive, HostWaiting, HostOnline };
+typedef NS_ENUM(NSInteger, ServiceOp) { ServiceInstall, ServiceUninstall, ServiceRestart };
 
 #pragma mark - Theme Palette
 
@@ -434,8 +495,11 @@ static UIColor *SecondaryPillTextColor(BOOL destructive, BOOL enabled) {
         if (!enabled) {
             return dark ? [UIColor colorWithWhite:1.0 alpha:0.28] : [UIColor colorWithWhite:0.0 alpha:0.28];
         }
-        if (dark && destructive) {
-            return [UIColor colorWithRed:1.000 green:0.353 blue:0.310 alpha:1];
+        // Destructive pills read as danger in both modes; the confirmation dialog is the guard,
+        // the red label is the hint that it will be needed.
+        if (destructive) {
+            return dark ? [UIColor colorWithRed:1.000 green:0.353 blue:0.310 alpha:1]
+                        : [UIColor colorWithRed:0.780 green:0.180 blue:0.140 alpha:1];
         }
         return dark ? [UIColor whiteColor] : [UIColor colorWithRed:0.047 green:0.047 blue:0.055 alpha:1];
     }];
@@ -448,6 +512,83 @@ static UIColor *SubtleDividerColor(void) {
             : [UIColor colorWithWhite:0.0 alpha:0.06];
     }];
 }
+
+@interface LogScrollHandle : UIControl
+@property(nonatomic, weak) UIScrollView *scroll;
+@end
+@implementation LogScrollHandle
+- (void)accessibilityIncrement {
+    UIScrollView *s = self.scroll;
+    CGFloat bottom = MAX(-s.adjustedContentInset.top, s.contentSize.height - s.bounds.size.height + s.adjustedContentInset.bottom);
+    [s setContentOffset:CGPointMake(s.contentOffset.x, MIN(bottom, s.contentOffset.y + s.bounds.size.height * 0.8)) animated:NO];
+}
+- (void)accessibilityDecrement {
+    UIScrollView *s = self.scroll;
+    [s setContentOffset:CGPointMake(s.contentOffset.x, MAX(-s.adjustedContentInset.top, s.contentOffset.y - s.bounds.size.height * 0.8)) animated:NO];
+}
+@end
+
+// A persistent thumb with a 44pt hit area, so long logs can be scrubbed without a long press.
+@interface LogTextView : UITextView
+@property(nonatomic) LogScrollHandle *scrollHandle;
+@property(nonatomic) UIView *scrollThumb;
+@property(nonatomic) CGFloat dragStartOffset;
+@property(nonatomic) CGFloat dragRange;
+@property(nonatomic) CGFloat dragTravel;
+@end
+@implementation LogTextView
+- (instancetype)init {
+    if ((self = [super init])) {
+        self.showsVerticalScrollIndicator = NO;
+        self.scrollHandle = [[LogScrollHandle alloc] init];
+        self.scrollHandle.scroll = self;
+        self.scrollHandle.isAccessibilityElement = YES;
+        self.scrollHandle.accessibilityLabel = T(@"日志滚动条", @"Log scroll bar");
+        self.scrollHandle.accessibilityTraits = UIAccessibilityTraitAdjustable;
+        self.scrollThumb = [[UIView alloc] init];
+        self.scrollThumb.userInteractionEnabled = NO;
+        self.scrollThumb.backgroundColor = [UIColor secondaryLabelColor];
+        self.scrollThumb.layer.cornerRadius = 3;
+        [self.scrollHandle addSubview:self.scrollThumb];
+        [self addSubview:self.scrollHandle];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragScrollHandle:)];
+        [self.scrollHandle addGestureRecognizer:pan];
+        [self.panGestureRecognizer requireGestureRecognizerToFail:pan];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat top = -self.adjustedContentInset.top;
+    CGFloat range = MAX(0, self.contentSize.height - self.bounds.size.height + self.adjustedContentInset.bottom - top);
+    self.scrollHandle.hidden = range <= 1;
+    if (self.scrollHandle.hidden) return;
+    CGFloat track = MAX(0, self.bounds.size.height - 16);
+    CGFloat height = MIN(track, MAX(44, track * self.bounds.size.height / (self.bounds.size.height + range)));
+    CGFloat ratio = MIN(1, MAX(0, (self.contentOffset.y - top) / range));
+    self.scrollHandle.frame = CGRectMake(self.bounds.origin.x + self.bounds.size.width - 44,
+        self.bounds.origin.y + 8 + ratio * (track - height), 44, height);
+    self.scrollThumb.frame = CGRectMake(32, 0, 6, height);
+    self.scrollHandle.accessibilityValue = [NSString stringWithFormat:@"%.0f%%", ratio * 100];
+    [self bringSubviewToFront:self.scrollHandle];
+}
+- (void)scrollFromHandle:(CGFloat)translation {
+    if (self.dragTravel <= 0) return;
+    CGFloat top = -self.adjustedContentInset.top;
+    CGFloat y = MIN(top + self.dragRange, MAX(top, self.dragStartOffset + translation * self.dragRange / self.dragTravel));
+    [self setContentOffset:CGPointMake(self.contentOffset.x, y) animated:NO];
+}
+- (void)dragScrollHandle:(UIPanGestureRecognizer *)pan {
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        [self setContentOffset:self.contentOffset animated:NO];
+        self.dragStartOffset = self.contentOffset.y;
+        self.dragRange = MAX(0, self.contentSize.height - self.bounds.size.height + self.adjustedContentInset.top + self.adjustedContentInset.bottom);
+        self.dragTravel = self.bounds.size.height - 16 - self.scrollHandle.bounds.size.height;
+    }
+    if (pan.state == UIGestureRecognizerStateBegan || pan.state == UIGestureRecognizerStateChanged)
+        [self scrollFromHandle:[pan translationInView:self.superview].y];
+}
+@end
 
 @interface PanelController : UITabBarController <UITextFieldDelegate, UITabBarControllerDelegate>
 @property(nonatomic) NSTimer *timer;
@@ -469,10 +610,12 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) UILabel *statusLabel;
 @property(nonatomic) UILabel *lastSessionTitleLabel;
 @property(nonatomic) UILabel *lastSessionLabel;
+@property(nonatomic) UIView *lastSessionRow;
 @property(nonatomic) UIStackView *qrGroup;
 @property(nonatomic) UIImageView *qrView;
 @property(nonatomic) NSDate *qrModified;
 @property(nonatomic) NSDictionary *qrBeforeRequest;
+@property(nonatomic) NSDictionary *qrBeforeRequestRootfs;
 @property(nonatomic) NSDate *loginDeadline;
 @property(nonatomic) UIButton *refreshLoginButton;
 @property(nonatomic) BOOL requestingLogin;
@@ -487,6 +630,7 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) NSDate *logoutDeadline;
 @property(nonatomic) BOOL signedIn;
 @property(nonatomic) BOOL hostAvailable;
+@property(nonatomic) BOOL hostFilesFromRootfs;
 @property(nonatomic) UILabel *accountResult;
 // Service install
 @property(nonatomic) UIView *installCard;
@@ -505,6 +649,22 @@ static UIColor *SubtleDividerColor(void) {
 @property(nonatomic) UILabel *uninstallResult;
 @property(nonatomic) UILabel *uninstallOutput;
 @property(nonatomic) BOOL uninstalling;
+@property(nonatomic) UIButton *restartButton;
+@property(nonatomic) UIButton *serviceInstallButton;
+@property(nonatomic) BOOL restarting;
+@property(nonatomic, readonly) BOOL serviceBusy;
+// Logs
+@property(nonatomic) UISegmentedControl *logSource;
+@property(nonatomic) UITextView *logText;
+@property(nonatomic) UILabel *logPathLabel;
+@property(nonatomic) UILabel *logTimezoneLabel;
+@property(nonatomic) UIButton *logCopyButton;
+@property(nonatomic) UIButton *logShareButton;
+@property(nonatomic) UIButton *diagnoseButton;
+@property(nonatomic) UIButton *logClearButton;
+@property(nonatomic) BOOL clearingLog;
+@property(nonatomic) BOOL diagnosing;
+@property(nonatomic) NSString *diagnosticOutput;
 // Auto-unlock
 @property(nonatomic) UIView *unlockCard;
 @property(nonatomic) UIView *unlockStatusPill;
@@ -551,6 +711,8 @@ static UIColor *SubtleDividerColor(void) {
                 [self insetSection:[self serviceCard]]]],
         [self pageWithTitle:T(@"快捷键", @"Shortcuts") tab:T(@"快捷键", @"Shortcuts") symbol:@"keyboard"
             sections:@[[self insetSection:[self shortcutsCard]]]],
+
+        [self logPage],
     ];
     self.tabBar.hidden = YES;
     [self setupFloatingTabBar];
@@ -565,6 +727,7 @@ static UIColor *SubtleDividerColor(void) {
 - (void)setSelectedIndex:(NSUInteger)selectedIndex {
     [super setSelectedIndex:selectedIndex];
     [self updateFloatingTabBar];
+    if (self.logText && selectedIndex == [self.scrollViews indexOfObject:self.logText]) [self reloadLog];
 }
 
 - (void)setupFloatingTabBar {
@@ -586,6 +749,7 @@ static UIColor *SubtleDividerColor(void) {
         T(@"连接", @"Connect"),
         T(@"安全", @"Security"),
         T(@"快捷键", @"Shortcuts"),
+        T(@"日志", @"Logs"),
     ];
     NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
     UIStackView *row = [[UIStackView alloc] init];
@@ -885,6 +1049,7 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     sessionRow.axis = UILayoutConstraintAxisHorizontal;
     sessionRow.spacing = 14;
     sessionRow.alignment = UIStackViewAlignmentCenter;
+    self.lastSessionRow = sessionRow;
     [stack addArrangedSubview:sessionRow];
     return plate;
 }
@@ -948,11 +1113,15 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
 - (UIView *)installCardView {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
-    [stack addArrangedSubview:[self cardTitle:T(@"安装服务", @"Install Daemon Service")]];
+    [stack addArrangedSubview:[self cardTitle:T(@"安装或修复服务", @"Install or Repair Service")]];
+    UILabel *hint = Label(UIFontTextStyleFootnote, NO, [UIColor secondaryLabelColor]);
+    hint.text = T(@"安装或修复将重启后台服务。", @"Installing or repairing restarts the service.");
+    hint.numberOfLines = 0;
+    [stack addArrangedSubview:hint];
 
     self.installPassword = [NSMutableString string];
     self.installField = [self maskedFieldWithPlaceholder:T(@"Root / Sudo 密码（默认 123）", @"Root / Sudo Password (default 123)")];
-    self.installButton = [self buttonWithTitle:T(@"安装", @"Install Service") bold:YES action:@selector(installService)];
+    self.installButton = [self buttonWithTitle:T(@"安装或修复", @"Install or Repair") bold:YES action:@selector(installService)];
     [self.installButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.installField, self.installButton]];
     row.axis = UILayoutConstraintAxisVertical;
@@ -965,6 +1134,9 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     self.installResult.hidden = YES;
     [stack addArrangedSubview:self.installResult];
     self.installOutput = MonoLabel(UIFontTextStyleFootnote, [UIColor secondaryLabelColor]);
+    // Errors carry paths and errno; show them whole.
+    self.installOutput.numberOfLines = 0;
+    self.installOutput.lineBreakMode = NSLineBreakByCharWrapping;
     self.installOutput.hidden = YES;
     [stack addArrangedSubview:self.installOutput];
     return card;
@@ -1022,6 +1194,16 @@ static UIFont *FontWeight(UIFontTextStyle style, UIFontWeight weight) {
     UIStackView *stack;
     UIView *card = [self cardWithStack:&stack];
     [stack addArrangedSubview:[self cardTitle:T(@"宿主服务", @"Host Service")]];
+    self.restartButton = [self pillSecondaryButtonWithTitle:T(@"重启宿主服务", @"Restart Host Service")
+        destructive:NO action:@selector(confirmRestart)];
+    [self.restartButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [stack addArrangedSubview:self.restartButton];
+    // Takes the place of restart/uninstall once the service is gone.
+    self.serviceInstallButton = [self pillSecondaryButtonWithTitle:T(@"安装宿主服务", @"Install Host Service")
+        destructive:NO action:@selector(confirmInstall)];
+    [self.serviceInstallButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    self.serviceInstallButton.hidden = YES;
+    [stack addArrangedSubview:self.serviceInstallButton];
     self.uninstallButton = [self pillSecondaryButtonWithTitle:T(@"卸载宿主服务", @"Uninstall Host Service")
         destructive:YES action:@selector(confirmUninstall)];
     [self.uninstallButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -1045,12 +1227,27 @@ static NSString *PanelVersion(void) {
 }
 
 - (void)refreshVersion:(NSDictionary *)status {
-    NSString *host = [status[@"version"] isKindOfClass:[NSString class]] ? status[@"version"] : nil;
     NSString *panel = PanelVersion();
+    NSString *hostDisplay;
+    BOOL mismatch = NO;
+    if (!self.hostAvailable) {
+        hostDisplay = T(@"状态未知", @"status unknown");
+    } else {
+        NSString *host = [status[@"version"] isKindOfClass:[NSString class]] ? status[@"version"] : nil;
+        if (!host.length) {
+            hostDisplay = T(@"未知版本", @"unknown version");
+            mismatch = YES;
+        } else if (![host isEqualToString:panel]) {
+            hostDisplay = host;
+            mismatch = YES;
+        } else {
+            hostDisplay = host;
+            mismatch = NO;
+        }
+    }
     NSString *text = [NSString stringWithFormat:@"%@ %@ · %@ %@", T(@"面板", @"Panel"), panel,
-        T(@"宿主", @"Host"), host ?: T(@"未运行", @"not running")];
+        T(@"宿主", @"Host"), hostDisplay];
     // A host without the field predates versioning: it is older than any versioned panel.
-    BOOL mismatch = self.hostAvailable && ![host isEqualToString:panel];
     if (mismatch) text = [text stringByAppendingFormat:@"\n%@",
         T(@"版本不一致，请重新安装宿主服务", @"Versions differ; reinstall the host service")];
     SetText(self.versionLabel, text);
@@ -1370,7 +1567,7 @@ static NSString *PanelVersion(void) {
     [self resetPasscodeField];
     if (ok) {
         // A result from the previous passcode no longer applies.
-        [[NSFileManager defaultManager] removeItemAtPath:kUnlockStatusPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:HostTmpPath(kUnlockStatusPath, self.hostFilesFromRootfs) error:nil];
         self.unlockNotice = nil;
         [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
     } else {
@@ -1382,7 +1579,7 @@ static NSString *PanelVersion(void) {
 
 - (void)clearPasscode {
     [[NSFileManager defaultManager] removeItemAtPath:kPasscodePath error:nil];
-    [[NSFileManager defaultManager] removeItemAtPath:kUnlockStatusPath error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:HostTmpPath(kUnlockStatusPath, self.hostFilesFromRootfs) error:nil];
     self.unlockNotice = nil;
     [self resetPasscodeField];
     [self refresh];
@@ -1409,8 +1606,14 @@ static NSString *PanelVersion(void) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)rememberCurrentQR {
+    NSFileManager *files = [NSFileManager defaultManager];
+    self.qrBeforeRequest = [files attributesOfItemAtPath:kQRPath error:nil];
+    self.qrBeforeRequestRootfs = [files attributesOfItemAtPath:HostTmpPath(kQRPath, YES) error:nil];
+}
+
 - (void)logout {
-    if (!self.signedIn || self.loggingOut || self.installing || self.uninstalling) return;
+    if (!self.signedIn || self.loggingOut || self.serviceBusy) return;
     if (!WritePrivate(kCommandPath, [@"logout\n" dataUsingEncoding:NSUTF8StringEncoding])) {
         self.accountResult.text = T(@"退出请求失败，请重试", @"Couldn't request sign-out; try again");
         [self refresh];
@@ -1418,7 +1621,7 @@ static NSString *PanelVersion(void) {
     }
     self.loggingOut = YES;
     self.logoutDeadline = [NSDate dateWithTimeIntervalSinceNow:90];
-    self.qrBeforeRequest = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    [self rememberCurrentQR];
     self.accountResult.text = @"";
     self.qrView.image = nil;
     self.qrModified = nil;
@@ -1426,14 +1629,14 @@ static NSString *PanelVersion(void) {
 }
 
 - (void)refreshLogin {
-    if (!self.hostAvailable || self.signedIn || self.loggingOut || self.requestingLogin || self.installing || self.uninstalling) return;
+    if (!self.hostAvailable || self.signedIn || self.loggingOut || self.requestingLogin || self.serviceBusy) return;
     if (!WritePrivate(kCommandPath, [@"refresh-login\n" dataUsingEncoding:NSUTF8StringEncoding])) {
         self.accountResult.text = T(@"刷新请求失败，请重试", @"Couldn't request a new QR code; try again");
         [self refresh];
         return;
     }
     self.requestingLogin = YES;
-    self.qrBeforeRequest = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    [self rememberCurrentQR];
     self.loginDeadline = [NSDate dateWithTimeIntervalSinceNow:90];
     self.accountResult.text = @"";
     self.qrView.image = nil;
@@ -1444,7 +1647,7 @@ static NSString *PanelVersion(void) {
 #pragma mark - Service install
 
 - (void)installService {
-    if (self.installing || self.uninstalling) return;
+    if (self.serviceBusy) return;
     NSString *password = self.installPassword.length ? [self.installPassword copy] : @"123";
     [self.installPassword setString:@""];
     self.installField.text = @"";
@@ -1452,12 +1655,12 @@ static NSString *PanelVersion(void) {
     [self runServiceOperation:NO password:password];
 }
 
-- (void)confirmUninstall {
-    if (self.installing || self.uninstalling) return;
+// Uninstall and restart ask for the sudo password in an alert; empty means the Dopamine default.
+- (void)confirmService:(NSString *)title message:(NSString *)message action:(NSString *)action
+    destructive:(BOOL)destructive then:(void (^)(NSString *password))then {
+    if (self.serviceBusy) return;
     [self dismissKeyboard];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:T(@"卸载宿主服务？", @"Uninstall host service?")
-        message:T(@"远程连接将断开，宿主及其启动项将移除。保留登录、设置、记录与 Frida 程序。",
-            @"Remote connections will close and the host and its launch jobs will be removed. Sign-in, settings, history and the Frida binary are kept.")
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
         preferredStyle:UIAlertControllerStyleAlert];
     __weak UIAlertController *weakAlert = alert;
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
@@ -1470,53 +1673,347 @@ static NSString *PanelVersion(void) {
     }];
     [alert addAction:[UIAlertAction actionWithTitle:T(@"取消", @"Cancel") style:UIAlertActionStyleCancel
         handler:^(UIAlertAction *a) { weakAlert.textFields.firstObject.text = @""; }]];
-    [alert addAction:[UIAlertAction actionWithTitle:T(@"卸载", @"Uninstall") style:UIAlertActionStyleDestructive
+    [alert addAction:[UIAlertAction actionWithTitle:action
+        style:destructive ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
         handler:^(UIAlertAction *a) {
             UITextField *field = weakAlert.textFields.firstObject;
             NSString *password = field.text.length ? [field.text copy] : @"123";
             field.text = @"";
-            [self runServiceOperation:YES password:password];
+            then(password);
         }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)confirmUninstall {
+    [self confirmService:T(@"卸载宿主服务？", @"Uninstall host service?")
+        message:T(@"远程连接将断开，宿主及其启动项将移除。保留登录、设置、记录与 Frida 程序。",
+            @"Remote connections will close and the host and its launch jobs will be removed. Sign-in, settings, history and the Frida binary are kept.")
+        action:T(@"卸载", @"Uninstall") destructive:YES
+        then:^(NSString *password) { [self runService:ServiceUninstall password:password]; }];
+}
+
+- (void)confirmRestart {
+    [self confirmService:T(@"重启宿主服务？", @"Restart host service?")
+        message:T(@"远程连接将断开，宿主与 frida-server 重新启动。登录与设置保留。",
+            @"Remote connections will close while the host and frida-server start again. Sign-in and settings are kept.")
+        action:T(@"重启", @"Restart") destructive:NO
+        then:^(NSString *password) { [self runService:ServiceRestart password:password]; }];
+}
+
+- (BOOL)serviceBusy { return self.installing || self.uninstalling || self.restarting || self.diagnosing || self.clearingLog; }
+
+- (void)confirmInstall {
+    [self confirmService:T(@"安装宿主服务？", @"Install host service?")
+        message:T(@"安装宿主与 frida-server 并启动。", @"Installs and starts the host and frida-server.")
+        action:T(@"安装", @"Install") destructive:NO
+        then:^(NSString *password) { [self runService:ServiceInstall password:password]; }];
+}
+
 - (void)runServiceOperation:(BOOL)uninstall password:(NSString *)password {
-    if (self.installing || self.uninstalling) return;
-    self.installing = !uninstall;
-    self.uninstalling = uninstall;
+    [self runService:uninstall ? ServiceUninstall : ServiceInstall password:password];
+}
+
+- (void)runService:(ServiceOp)op password:(NSString *)password {
+    if (self.serviceBusy) return;
+    self.installing = op == ServiceInstall;
+    self.uninstalling = op == ServiceUninstall;
+    self.restarting = op == ServiceRestart;
     self.installFinished = NO;
     self.uninstallResult.text = @"";
     self.uninstallOutput.text = @"";
     [self refresh];
+    NSString *script = op == ServiceInstall ? @"install-service.sh" : op == ServiceUninstall ? @"uninstall-service.sh" : @"restart-service.sh";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL ok, timedOut;
-        NSString *output = RunServiceScript(uninstall ? @"uninstall-service.sh" : @"install-service.sh", password, &ok, &timedOut);
+        NSString *output = RunServiceScript(script, nil, password, &ok, &timedOut);
         dispatch_async(dispatch_get_main_queue(), ^{
             self.installing = NO;
             self.uninstalling = NO;
+            self.restarting = NO;
+            BOOL badPassword = !ok && !timedOut && ([output rangeOfString:@"incorrect password"].location != NSNotFound
+                || [output rangeOfString:@"Sorry, try again"].location != NSNotFound);
+            BOOL agentConflict = !ok && !timedOut && [output containsString:@"different Frida agent at alternate path; not overwriting"];
             NSString *statusWord;
-            if (uninstall) {
-                statusWord = ok ? T(@"卸载完成", @"Uninstalled")
-                    : timedOut ? T(@"卸载超时，请重试", @"Uninstall timed out; try again")
-                    : T(@"卸载失败，请重试", @"Uninstall failed; try again");
-                self.uninstallResult.text = statusWord;
-                self.uninstallResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
-                self.uninstallOutput.text = output;
-                if (ok) {
-                    [self.installPassword setString:@""];
-                    self.installField.text = @"";
-                }
-            } else {
+            if (op == ServiceInstall) {
                 self.installFinished = YES;
                 statusWord = ok ? T(@"安装完成", @"installed")
-                    : timedOut ? T(@"安装超时", @"timed out") : T(@"安装失败", @"failed");
+                    : timedOut ? T(@"安装超时", @"timed out")
+                    : badPassword ? T(@"sudo 密码错误", @"wrong sudo password")
+                    : agentConflict ? T(@"其他 Frida 组件冲突，未覆盖", @"Existing Frida agent differs; not overwritten")
+                    : T(@"安装失败", @"failed");
                 self.installResult.text = [NSString stringWithFormat:@"$ status: %@", statusWord];
                 self.installResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
                 self.installOutput.text = output;
+                // Also on the Security card, which offers install after an uninstall.
+                self.uninstallResult.text = ok ? T(@"安装完成", @"Installed") : statusWord;
+                self.uninstallResult.textColor = self.installResult.textColor;
+                self.uninstallOutput.text = output;
+            } else {
+                BOOL restart = op == ServiceRestart;
+                statusWord = ok ? (restart ? T(@"已重启", @"Restarted") : T(@"卸载完成", @"Uninstalled"))
+                    : timedOut ? (restart ? T(@"重启超时，请重试", @"Restart timed out; try again") : T(@"卸载超时，请重试", @"Uninstall timed out; try again"))
+                    : badPassword ? T(@"sudo 密码错误，请重试", @"Wrong sudo password; try again")
+                    : restart ? T(@"重启失败，请重试", @"Restart failed; try again") : T(@"卸载失败，请重试", @"Uninstall failed; try again");
+                self.uninstallResult.text = statusWord;
+                self.uninstallResult.textColor = ok ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+                self.uninstallOutput.text = output;
+                if (ok && !restart) {
+                    [self.installPassword setString:@""];
+                    self.installField.text = @"";
+                }
             }
             [self refresh];
         });
     });
+}
+
+#pragma mark - Logs
+
+static const unsigned long long kLogTailBytes = 256 * 1024;
+
+// The last kLogTailBytes of a daemon log, starting at a line; nil with *error when it cannot be read.
+static NSString *ReadLogTail(NSString *path, NSString **error) {
+    NSFileHandle *file = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!file) {
+        *error = [[NSFileManager defaultManager] fileExistsAtPath:path]
+            ? T(@"无法读取日志（权限不足）。重启宿主服务后会修正权限。", @"Can't read the log (permission denied). Restarting the host service fixes the permissions.")
+            : T(@"还没有日志：宿主服务未安装或尚未启动。", @"No log yet: the host service is not installed or has not started.");
+        return nil;
+    }
+    unsigned long long size = [file seekToEndOfFile];
+    BOOL cut = size > kLogTailBytes;
+    [file seekToFileOffset:cut ? size - kLogTailBytes : 0];
+    NSData *data = [file readDataToEndOfFile];
+    [file closeFile];
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        ?: [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] ?: @"";
+    if (cut) {
+        NSRange newline = [text rangeOfString:@"\n"];
+        if (newline.location != NSNotFound) text = [text substringFromIndex:newline.location + 1];
+    }
+    return text;
+}
+
+- (NSString *)logPath {
+    NSString *root = JailbreakRoot() ?: @"/var/jb";
+    NSString *name = self.logSource.selectedSegmentIndex == 1 ? @"frida-server.log" : @"uuremote.log";
+    return [[root stringByAppendingPathComponent:@"var/log"] stringByAppendingPathComponent:name];
+}
+
+- (UIViewController *)logPage {
+    UIViewController *controller = [[UIViewController alloc] init];
+    controller.title = T(@"日志", @"Logs");
+    controller.view.backgroundColor = PageSurfaceColor();
+    UIStackView *stack;
+    UIView *card = [self cardWithStack:&stack];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:card];
+    [stack addArrangedSubview:[self cardTitle:T(@"日志", @"Logs")]];
+
+    self.logSource = [[UISegmentedControl alloc] initWithItems:@[T(@"宿主", @"Host"), @"frida-server"]];
+    self.logSource.selectedSegmentIndex = 0;
+    [self.logSource addTarget:self action:@selector(reloadLog) forControlEvents:UIControlEventValueChanged];
+    [stack addArrangedSubview:self.logSource];
+
+    UIButton *reload = [self pillSecondaryButtonWithTitle:T(@"刷新", @"Refresh") destructive:NO action:@selector(reloadLog)];
+    self.logCopyButton = [self pillSecondaryButtonWithTitle:T(@"复制", @"Copy") destructive:NO action:@selector(copyLog)];
+    self.logShareButton = [self pillSecondaryButtonWithTitle:T(@"分享", @"Share") destructive:NO action:@selector(shareLog)];
+    for (UIButton *b in @[reload, self.logCopyButton, self.logShareButton])
+        [b setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[reload, self.logCopyButton, self.logShareButton]];
+    buttons.axis = UILayoutConstraintAxisHorizontal;
+    buttons.distribution = UIStackViewDistributionFillEqually;
+    buttons.spacing = 10;
+    [stack addArrangedSubview:buttons];
+    self.diagnoseButton = [self pillSecondaryButtonWithTitle:T(@"服务诊断", @"Service Diagnostics") destructive:NO action:@selector(confirmDiagnostics)];
+    [self.diagnoseButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    self.logClearButton = [self pillSecondaryButtonWithTitle:T(@"清除日志", @"Clear Log") destructive:YES action:@selector(confirmClearLog)];
+    [self.logClearButton setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *tools = [[UIStackView alloc] initWithArrangedSubviews:@[self.diagnoseButton, self.logClearButton]];
+    tools.axis = UILayoutConstraintAxisHorizontal;
+    tools.distribution = UIStackViewDistributionFillEqually;
+    tools.spacing = 10;
+    [stack addArrangedSubview:tools];
+
+    self.logPathLabel = MonoLabel(UIFontTextStyleCaption1, [UIColor secondaryLabelColor]);
+    // One line: the file name identifies the log, so a long jailbreak path is cut in the middle
+    // instead of wrapping to a second line and pushing the log down.
+    self.logPathLabel.numberOfLines = 1;
+    self.logPathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [stack addArrangedSubview:self.logPathLabel];
+    self.logTimezoneLabel = Label(UIFontTextStyleCaption1, NO, [UIColor secondaryLabelColor]);
+    self.logTimezoneLabel.text = T(@"时间末尾的 Z 表示 UTC", @"Timestamps ending in Z use UTC");
+    self.logTimezoneLabel.numberOfLines = 0;
+    [stack addArrangedSubview:self.logTimezoneLabel];
+
+    UITextView *text = [[LogTextView alloc] init];
+    text.editable = NO;
+    text.selectable = YES;
+    text.alwaysBounceVertical = YES;
+    text.backgroundColor = FieldFillColor();
+    text.textColor = [UIColor labelColor];
+    text.layer.cornerRadius = 16;
+    text.layer.cornerCurve = kCACornerCurveContinuous;
+    text.textContainerInset = UIEdgeInsetsMake(12, 10, 12, 20);
+    UIFont *mono = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    text.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleCaption1] scaledFontForFont:mono];
+    text.adjustsFontForContentSizeCategory = YES;
+    text.accessibilityLabel = T(@"日志内容", @"Log contents");
+    [text setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [text setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [stack addArrangedSubview:text];
+    self.logText = text;
+    [self.scrollViews addObject:text]; // keeps scrollViews indexed by tab
+
+    NSLayoutConstraint *fill = [card.widthAnchor constraintEqualToAnchor:controller.view.widthAnchor constant:-40];
+    fill.priority = 750;
+    UILayoutGuide *safe = controller.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [card.topAnchor constraintEqualToAnchor:safe.topAnchor constant:20],
+        // Clear of the floating tab bar.
+        [card.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-92],
+        [card.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+        [card.widthAnchor constraintLessThanOrEqualToConstant:680],
+        [card.widthAnchor constraintLessThanOrEqualToAnchor:controller.view.widthAnchor constant:-40],
+        fill,
+        [text.heightAnchor constraintGreaterThanOrEqualToConstant:120],
+    ]];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:controller];
+    navigation.navigationBarHidden = YES;
+    return navigation;
+}
+
+- (void)confirmClearLog {
+    NSString *source = self.logSource.selectedSegmentIndex == 1 ? @"frida" : @"host";
+    NSString *name = [source isEqualToString:@"frida"] ? @"frida-server" : T(@"宿主", @"host");
+    [self confirmService:T(@"清除当前日志？", @"Clear current log?")
+        message:[NSString stringWithFormat:T(@"将清空 %@ 日志，无法撤销。不会重启服务。", @"Clears the %@ log permanently without restarting services."), name]
+        action:T(@"清除", @"Clear") destructive:YES
+        then:^(NSString *password) { [self clearLog:source password:password]; }];
+}
+
+- (void)clearLog:(NSString *)source password:(NSString *)password {
+    if (self.serviceBusy) return;
+    self.clearingLog = YES;
+    self.logSource.enabled = self.logClearButton.enabled = self.diagnoseButton.enabled = NO;
+    self.logCopyButton.enabled = self.logShareButton.enabled = NO;
+    self.logPathLabel.text = T(@"正在清除…", @"Clearing…");
+    [self refresh];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL ok, timedOut;
+        NSString *output = RunServiceScript(@"clear-log.sh", source, password, &ok, &timedOut);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.clearingLog = NO;
+            self.logSource.enabled = self.logClearButton.enabled = self.diagnoseButton.enabled = YES;
+            if (ok) {
+                [self reloadLog];
+                self.logPathLabel.text = T(@"日志已清除", @"Log cleared");
+            } else {
+                self.diagnosticOutput = output.length ? output : T(@"清除失败，请重试", @"Couldn't clear the log; try again");
+                self.logText.text = self.diagnosticOutput;
+                self.logPathLabel.text = timedOut ? T(@"清除超时", @"Clear timed out") : T(@"清除失败", @"Clear failed");
+                self.logCopyButton.enabled = self.logShareButton.enabled = YES;
+            }
+            [self refresh];
+        });
+    });
+}
+
+- (void)confirmDiagnostics {
+    [self confirmService:T(@"运行服务诊断？", @"Run service diagnostics?")
+        message:T(@"只读取启动项状态和 Frida 进程数量，不会重启服务。", @"Reads job status and the Frida process count without restarting services.")
+        action:T(@"诊断", @"Diagnose") destructive:NO
+        then:^(NSString *password) { [self runDiagnostics:password]; }];
+}
+
+- (void)runDiagnostics:(NSString *)password {
+    if (self.serviceBusy) return;
+    self.diagnosing = YES;
+    self.diagnosticOutput = nil;
+    self.logPathLabel.text = T(@"正在诊断…", @"Diagnosing…");
+    self.logText.text = @"";
+    self.logCopyButton.enabled = self.logShareButton.enabled = NO;
+    self.diagnoseButton.enabled = NO;
+    [self refresh];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL ok, timedOut;
+        NSString *output = RunServiceScript(@"diagnose-service.sh", nil, password, &ok, &timedOut);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.diagnosing = NO;
+            self.diagnoseButton.enabled = YES;
+            self.diagnosticOutput = output.length ? output : T(@"没有诊断输出", @"No diagnostic output");
+            self.logPathLabel.text = ok ? T(@"服务诊断结果", @"Service diagnostics")
+                : timedOut ? T(@"诊断超时", @"Diagnostics timed out") : T(@"诊断失败", @"Diagnostics failed");
+            self.logText.text = self.diagnosticOutput;
+            self.logText.textColor = [UIColor labelColor];
+            self.logCopyButton.enabled = self.logShareButton.enabled = YES;
+            [self refresh];
+        });
+    });
+}
+
+- (void)reloadLog {
+    if (self.diagnosing || self.clearingLog) return;
+    self.diagnosticOutput = nil;
+    NSString *path = [self logPath];
+    NSString *error = nil;
+    NSString *log = ReadLogTail(path, &error);
+    self.logPathLabel.text = path;
+    self.logPathLabel.accessibilityLabel = path;
+    self.logText.text = log.length ? log : (error ?: T(@"日志为空", @"The log is empty"));
+    self.logText.textColor = log ? [UIColor labelColor] : [UIColor secondaryLabelColor];
+    self.logCopyButton.enabled = self.logShareButton.enabled = log.length > 0;
+    [self.logText layoutIfNeeded];
+    CGFloat bottom = self.logText.contentSize.height - self.logText.bounds.size.height + self.logText.adjustedContentInset.bottom;
+    if (bottom > 0) [self.logText setContentOffset:CGPointMake(0, bottom) animated:NO];
+}
+
+// What a bug report needs besides the log: versions and the jailbreak layout, no account data.
+- (NSString *)logExport {
+    NSString *error = nil;
+    NSString *log = self.diagnosticOutput ?: ReadLogTail([self logPath], &error) ?: @"";
+    id host = ReadJSONDict(HostTmpPath(kStatusJSONPath, self.hostFilesFromRootfs))[@"version"];
+    NSString *root = JailbreakRoot();
+    NSString *layout = !root ? @"none" : [root isEqualToString:@"/var/jb"] ? @"rootless" : @"roothide";
+    NSString *system = [UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPhone ? @"iOS" : @"iPadOS";
+    NSString *header = [NSString stringWithFormat:@"# UURemotePanel %@ · host %@ · %@ %@ · jailbreak %@ · %@ (UTC)\n# %@\n\n",
+        PanelVersion(), [host isKindOfClass:[NSString class]] ? host : @"-", system, [UIDevice currentDevice].systemVersion,
+        layout, [NSISO8601DateFormatter stringFromDate:[NSDate date] timeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]
+            formatOptions:NSISO8601DateFormatWithInternetDateTime], self.diagnosticOutput ? @"service diagnostics" : [self logPath].lastPathComponent];
+    return [header stringByAppendingString:log];
+}
+
+- (void)copyLog {
+    [UIPasteboard generalPasteboard].string = [self logExport];
+    UIButton *button = self.logCopyButton;
+    [UIView performWithoutAnimation:^{ [button setTitle:T(@"已复制", @"Copied") forState:UIControlStateNormal]; [button layoutIfNeeded]; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView performWithoutAnimation:^{ [button setTitle:T(@"复制", @"Copy") forState:UIControlStateNormal]; [button layoutIfNeeded]; }];
+    });
+}
+
+- (void)shareLog {
+    NSDateFormatter *stamp = [[NSDateFormatter alloc] init];
+    stamp.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    stamp.dateFormat = @"yyyyMMdd-HHmmss";
+    NSString *name = [NSString stringWithFormat:@"%@-%@.log",
+        self.logSource.selectedSegmentIndex == 1 ? @"frida-server" : @"uuremote", [stamp stringFromDate:[NSDate date]]];
+    NSString *content = [self logExport];
+    NSString *temp = NSTemporaryDirectory();
+    NSURL *url = temp.length ? [NSURL fileURLWithPath:[temp stringByAppendingPathComponent:name]] : nil;
+    NSError *writeError = nil;
+    BOOL written = url && [[content dataUsingEncoding:NSUTF8StringEncoding] writeToURL:url options:NSDataWritingAtomic error:&writeError];
+    // Some jailbreak installations cannot write the app's temporary directory. Sharing text still works.
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[written ? url : content] applicationActivities:nil];
+    if (written) {
+        share.completionWithItemsHandler = ^(UIActivityType type, BOOL completed, NSArray *items, NSError *error) {
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        };
+    }
+    share.popoverPresentationController.sourceView = self.logShareButton;
+    share.popoverPresentationController.sourceRect = self.logShareButton.bounds;
+    UIViewController *presenter = self.selectedViewController ?: self;
+    [presenter presentViewController:share animated:YES completion:nil];
 }
 
 #pragma mark - Settings
@@ -1589,26 +2086,26 @@ static NSString *PanelVersion(void) {
     NSString *text, *badge, *detail, *symbol;
     switch (state) {
         case HostDown:
-            text = T(@"服务未运行", @"Host Offline");
-            badge = T(@"服务离线", @"HOST OFFLINE");
-            detail = T(@"后台服务没有响应", @"Service not responding");
+            text = T(@"状态不可用", @"Status Unavailable");
+            badge = text;
+            detail = T(@"未收到状态，请在安全页检查服务", @"No host status; check Security");
             symbol = @"minus"; break;
         case HostActive:
             text = T(@"正在远控", @"Session Active");
-            badge = T(@"实时连接", @"SESSION LIVE");
+            badge = text;
             detail = [NSString stringWithFormat:T(@"%ld 个连接", @"%ld connected"), (long)viewers];
             symbol = @"dot.radiowaves.left.and.right"; break;
         case HostWaiting:
             text = self.loggingOut ? T(@"正在退出…", @"Signing Out…")
                 : self.qrView.image ? T(@"等待扫码", @"Sign In") : T(@"正在加载二维码…", @"Loading QR Code…");
-            badge = T(@"扫码登录", @"SCAN QR");
+            badge = text;
             detail = self.qrView.image ? T(@"手机扫码登录", @"Scan to sign in")
                 : T(@"未登录", @"Not signed in");
             symbol = @"qrcode"; break;
         case HostOnline:
-            text = T(@"已上线", @"Online");
-            badge = T(@"在线就绪", @"HOST ONLINE");
-            detail = T(@"等待连接", @"Waiting for connection...");
+            text = T(@"服务运行中", @"Service Running");
+            badge = text;
+            detail = T(@"已登录 · 等待连接", @"Signed in · Waiting for connection");
             symbol = @"arrow.right"; break;
     }
     BOOL changed = !self.hasDisplayedState || self.displayedState != state;
@@ -1616,6 +2113,8 @@ static NSString *PanelVersion(void) {
         self.statusPlate.backgroundColor = HeroSurfaceColor(state);
         SetText(self.statusLabel, text);
         SetText(self.statusBadgeLabel, badge);
+        // 主卡状态由主标题大字号权威表达，全状态隐藏重复胶囊，杜绝同一字段同时出现两个不同状态。
+        SetHidden(self.statusBadgePill, YES);
         SetText(self.stateDetail, detail);
         self.statusBadgePill.backgroundColor = StatusBadgeFillColor(state);
         self.statusBadgeLabel.textColor = StatusBadgeTextColor(state);
@@ -1640,11 +2139,17 @@ static NSString *PanelVersion(void) {
 }
 
 - (void)refresh {
-    NSString *loginStatus = Trimmed([NSString stringWithContentsOfFile:kStatusPath encoding:NSUTF8StringEncoding error:nil]);
-    NSDictionary *status = ReadJSONDict(kStatusJSONPath);
-    NSArray<NSDictionary *> *history = ReadHistory();
+    BOOL rootfs = NO;
+    NSDictionary *status = ReadHostStatus(&rootfs);
+    if (self.hostFilesFromRootfs != rootfs) {
+        self.qrView.image = nil;
+        self.qrModified = nil;
+    }
+    self.hostFilesFromRootfs = rootfs;
+    NSString *loginStatus = Trimmed([NSString stringWithContentsOfFile:HostTmpPath(kStatusPath, rootfs) encoding:NSUTF8StringEncoding error:nil]);
+    NSArray<NSDictionary *> *history = ReadHistory(HostTmpPath(kHistoryPath, rootfs));
 
-    self.hostAvailable = status && [[NSDate date] timeIntervalSince1970] - Number(status[@"updated"]) <= kStaleAfter;
+    self.hostAvailable = HostStatusFresh(status, [[NSDate date] timeIntervalSince1970]);
     BOOL wasSignedIn = self.signedIn;
     self.signedIn = self.hostAvailable && [status[@"signed_in"] boolValue];
     if (self.signedIn && !wasSignedIn) self.accountResult.text = @"";
@@ -1671,6 +2176,7 @@ static NSString *PanelVersion(void) {
     if (self.signedIn && !self.loggingOut) {
         self.requestingLogin = NO;
         self.qrBeforeRequest = nil;
+        self.qrBeforeRequestRootfs = nil;
     } else if (self.requestingLogin && self.loginDeadline.timeIntervalSinceNow <= 0) {
         self.requestingLogin = NO;
         self.accountResult.text = T(@"二维码加载超时，请刷新", @"QR code loading timed out; refresh to retry");
@@ -1685,18 +2191,15 @@ static NSString *PanelVersion(void) {
     [self refreshQR:state == HostWaiting && !self.loggingOut];
     [self displayState:state viewers:(NSInteger)Number(status[@"viewers"])];
 
-    NSDictionary *last = history.lastObject;
-    SetText(self.lastSessionLabel, last
-        ? [NSString stringWithFormat:@"%@ · %@",
-              WhenText([NSDate dateWithTimeIntervalSince1970:Number(last[@"at"])]), DurationText(Number(last[@"duration_s"]))]
-        : T(@"暂无连接记录", @"No sessions yet"));
-
     [self refreshAccount:self.signedIn];
     // roothide hides /var/jb from an app, so the daemon binary cannot be probed by path: a fresh
     // status file means the service is installed and running.
     [self refreshInstall:state != HostDown];
     self.refreshLoginButton.enabled = self.hostAvailable && !self.loggingOut && !self.requestingLogin
-        && !self.installing && !self.uninstalling;
+        && !self.serviceBusy;
+    // Sign-out errors all end in "try again", which the disabled button cannot do while the host
+    // is down; the pending command runs when it comes back, so the message is dropped with it.
+    if (!self.hostAvailable) self.accountResult.text = @"";
     SetHidden(self.accountResult, self.accountResult.text.length == 0);
     [self refreshUnlock];
     [self refreshVersion:status];
@@ -1708,9 +2211,18 @@ static NSString *PanelVersion(void) {
 }
 
 - (void)refreshAccount:(BOOL)signedIn {
-    SetText(self.accountLabel, signedIn ? T(@"已登录", @"Signed in") : T(@"未登录", @"Signed out"));
-    self.accountAvatar.backgroundColor = signedIn ? PrimaryActionFillColor() : FieldFillColor();
-    self.accountSymbol.tintColor = signedIn ? [UIColor whiteColor] : [UIColor tertiaryLabelColor];
+    NSString *accountText;
+    if (self.loggingOut) {
+        accountText = T(@"正在退出…", @"Signing out…");
+    } else if (!self.hostAvailable) {
+        accountText = T(@"状态未知", @"Status unknown");
+    } else {
+        accountText = signedIn ? T(@"已登录", @"Signed in") : T(@"未登录", @"Signed out");
+    }
+    SetText(self.accountLabel, accountText);
+    BOOL activeSession = signedIn && self.hostAvailable && !self.loggingOut;
+    self.accountAvatar.backgroundColor = activeSession ? PrimaryActionFillColor() : FieldFillColor();
+    self.accountSymbol.tintColor = activeSession ? [UIColor whiteColor] : [UIColor tertiaryLabelColor];
     NSString *title = self.loggingOut ? T(@"正在退出…", @"Signing out…")
         : signedIn ? T(@"退出登录", @"Sign Out") : T(@"扫码登录", @"Sign In");
     if (![[self.logoutButton titleForState:UIControlStateNormal] isEqualToString:title]) {
@@ -1719,23 +2231,27 @@ static NSString *PanelVersion(void) {
             [self.logoutButton layoutIfNeeded];
         }];
     }
-    BOOL enabled = self.hostAvailable && !self.loggingOut && !self.installing && !self.uninstalling;
+    BOOL enabled = self.hostAvailable && !self.loggingOut && !self.serviceBusy;
     if (self.logoutButton.enabled != enabled) self.logoutButton.enabled = enabled;
 }
 
 - (void)refreshInstall:(BOOL)installed {
-    // 隐藏外层容器，否则被隐藏的卡片仍占着整段高度。
-    SetHidden(self.installSection, installed && !self.installFinished && !self.installing);
-    SetHidden(self.installCard, installed && !self.installFinished && !self.installing);
+    // A stale heartbeat alone does not mean the service has been uninstalled.
+    NSString *root = JailbreakRoot();
+    BOOL present = installed || (root && [[NSFileManager defaultManager] fileExistsAtPath:
+        [root stringByAppendingPathComponent:@"Library/LaunchDaemons/com.uuremote.host.plist"]]);
+    BOOL showInstallCard = !present || self.installing || (self.installFinished && !installed);
+    SetHidden(self.installSection, !showInstallCard);
+    SetHidden(self.installCard, !showInstallCard);
     SetHidden(self.installForm, installed);
-    NSString *title = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装", @"Install Service");
+    NSString *title = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装或修复", @"Install or Repair");
     if (![[self.installButton titleForState:UIControlStateNormal] isEqualToString:title]) {
         [UIView performWithoutAnimation:^{
             [self.installButton setTitle:title forState:UIControlStateNormal];
             [self.installButton layoutIfNeeded];
         }];
     }
-    BOOL busy = self.installing || self.uninstalling;
+    BOOL busy = self.serviceBusy;
     if (self.installButton.enabled != !busy) self.installButton.enabled = !busy;
     if (self.installField.enabled != !busy) self.installField.enabled = !busy;
     SetHidden(self.installResult, !self.installFinished);
@@ -1748,6 +2264,27 @@ static NSString *PanelVersion(void) {
         }];
     }
     if (self.uninstallButton.enabled != !busy) self.uninstallButton.enabled = !busy;
+    NSString *restartTitle = self.restarting ? T(@"正在重启…", @"Restarting…") : T(@"重启宿主服务", @"Restart Host Service");
+    if (![[self.restartButton titleForState:UIControlStateNormal] isEqualToString:restartTitle]) {
+        [UIView performWithoutAnimation:^{
+            [self.restartButton setTitle:restartTitle forState:UIControlStateNormal];
+            [self.restartButton layoutIfNeeded];
+        }];
+    }
+    if (self.restartButton.enabled != !busy) self.restartButton.enabled = !busy;
+    if (self.serviceInstallButton.enabled != !busy) self.serviceInstallButton.enabled = !busy;
+    NSString *serviceInstallTitle = self.installing ? T(@"正在安装…", @"Installing…") : T(@"安装宿主服务", @"Install Host Service");
+    if (![[self.serviceInstallButton titleForState:UIControlStateNormal] isEqualToString:serviceInstallTitle]) {
+        [UIView performWithoutAnimation:^{
+            [self.serviceInstallButton setTitle:serviceInstallTitle forState:UIControlStateNormal];
+            [self.serviceInstallButton layoutIfNeeded];
+        }];
+    }
+    // A running host or a leftover launch job counts as installed, so leftovers can still be removed.
+    BOOL offerInstall = self.installing || (!present && !self.uninstalling && !self.restarting);
+    SetHidden(self.serviceInstallButton, !offerInstall);
+    SetHidden(self.restartButton, offerInstall);
+    SetHidden(self.uninstallButton, offerInstall);
     SetHidden(self.uninstallResult, self.uninstallResult.text.length == 0);
     SetHidden(self.uninstallOutput, self.uninstallOutput.text.length == 0);
 }
@@ -1759,22 +2296,24 @@ static NSString *PanelVersion(void) {
         SetHidden(self.qrGroup, YES);
         return;
     }
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:kQRPath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:HostTmpPath(kQRPath, self.hostFilesFromRootfs) error:nil];
     NSDate *modified = attrs.fileModificationDate;
-    // The daemon atomically replaces the PNG; inode + mtime distinguish a new QR even on coarse clocks.
-    BOOL previousQR = self.qrBeforeRequest && [modified isEqualToDate:self.qrBeforeRequest.fileModificationDate]
-        && [attrs[NSFileSystemFileNumber] isEqual:self.qrBeforeRequest[NSFileSystemFileNumber]];
+    // Keep both views' old QR identities so switching views cannot revive a previous login code.
+    NSDictionary *before = self.hostFilesFromRootfs ? self.qrBeforeRequestRootfs : self.qrBeforeRequest;
+    BOOL previousQR = before && [modified isEqualToDate:before.fileModificationDate]
+        && [attrs[NSFileSystemFileNumber] isEqual:before[NSFileSystemFileNumber]];
     if (previousQR) {
         self.qrView.image = nil;
         self.qrModified = nil;
     } else if (!(modified == self.qrModified || [modified isEqualToDate:self.qrModified])) {
-        NSData *png = modified ? [NSData dataWithContentsOfFile:kQRPath] : nil;
+        NSData *png = modified ? [NSData dataWithContentsOfFile:HostTmpPath(kQRPath, self.hostFilesFromRootfs)] : nil;
         UIImage *image = png.length ? [UIImage imageWithData:png] : nil;
         self.qrView.image = image;
         self.qrModified = image ? modified : nil; // retry next tick if the daemon was mid-write
         if (image) {
             self.requestingLogin = NO;
             self.qrBeforeRequest = nil;
+            self.qrBeforeRequestRootfs = nil;
             self.accountResult.text = @"";
         }
     }
@@ -1796,7 +2335,7 @@ static NSString *PanelVersion(void) {
     }
     self.unlockNotice = nil;
     BOOL saved = [[NSFileManager defaultManager] fileExistsAtPath:kPasscodePath];
-    NSArray *parts = [Trimmed([NSString stringWithContentsOfFile:kUnlockStatusPath encoding:NSUTF8StringEncoding error:nil])
+    NSArray *parts = [Trimmed([NSString stringWithContentsOfFile:HostTmpPath(kUnlockStatusPath, self.hostFilesFromRootfs) encoding:NSUTF8StringEncoding error:nil])
         componentsSeparatedByString:@" "];
     NSString *text = saved ? T(@"已保存", @"Saved") : T(@"未保存", @"Not saved");
     UIColor *color = [UIColor secondaryLabelColor];
@@ -1829,6 +2368,14 @@ static NSString *PanelVersion(void) {
 }
 
 - (void)refreshHistory:(NSArray<NSDictionary *> *)history {
+    // The hero summary and the list show the same history, so both are updated here; an empty
+    // history hides the summary instead of repeating the list's empty state.
+    NSDictionary *last = history.lastObject;
+    SetText(self.lastSessionLabel, last
+        ? [NSString stringWithFormat:@"%@ · %@",
+              WhenText([NSDate dateWithTimeIntervalSince1970:Number(last[@"at"])]), DurationText(Number(last[@"duration_s"]))]
+        : @"");
+    SetHidden(self.lastSessionRow, last == nil);
     NSMutableArray<NSArray<NSString *> *> *items = [NSMutableArray array];
     for (NSDictionary *e in history.reverseObjectEnumerator) {
         if (items.count == 5) break;
@@ -1854,13 +2401,9 @@ static NSString *PanelVersion(void) {
         leftStack.axis = UILayoutConstraintAxisVertical;
         leftStack.spacing = 2;
 
-        UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
-            withConfiguration:[UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleFootnote]]];
-        chevron.tintColor = [UIColor tertiaryLabelColor];
-        [chevron setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-
+        // No chevron: the rows are a read-only list, and an arrow would promise a detail screen.
         UIView *spacer = [[UIView alloc] init];
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[leftStack, spacer, chevron]];
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[leftStack, spacer]];
         row.spacing = 12;
         row.alignment = UIStackViewAlignmentCenter;
         [row.heightAnchor constraintGreaterThanOrEqualToConstant:56].active = YES;

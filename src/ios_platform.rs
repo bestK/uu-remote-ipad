@@ -194,9 +194,8 @@ const STATUS_JSON: &str = "/private/var/tmp/uu-status.json";
 const HISTORY_JSONL: &str = "/private/var/tmp/uu-history.jsonl";
 const HISTORY_KEEP: usize = 20;
 
-static VIEWERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static SESSION_START: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-static LAST_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STATUS_PUBLISHER: OnceLock<crate::ios_status::Publisher> = OnceLock::new();
 
 fn epoch() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -210,43 +209,34 @@ fn signed_in() -> bool {
 /// iPad release tag (ipad-vX.Y.Z) stamped by ios/app/build.sh, else the commit or "dev".
 pub const VERSION: &str = match option_env!("UU_IPAD_VERSION") { Some(v) => v, None => "dev" };
 
-fn write_status() {
-    let status = serde_json::json!({
-        "version": VERSION,
-        "signed_in": signed_in(),
-        "viewers": VIEWERS.load(std::sync::atomic::Ordering::Relaxed),
-        "last_session_end": LAST_END.load(std::sync::atomic::Ordering::Relaxed),
-        "updated": epoch(),
-    });
-    let _ = std::fs::write(STATUS_JSON, status.to_string());
+fn write_status(event: crate::ios_status::Event) {
+    let publisher = STATUS_PUBLISHER.get_or_init(|| crate::ios_status::Publisher::new(STATUS_JSON, VERSION));
+    let _ = publisher.publish(event, signed_in(), epoch());
 }
 
 /// A desktop session came up: count it and note when it started.
 pub fn note_session_started() {
-    VIEWERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut start) = SESSION_START.lock() { *start = Some(std::time::Instant::now()); }
-    write_status();
+    write_status(crate::ios_status::Event::Started);
 }
 
 /// A desktop session ended: record its length for the panel's history.
 pub fn note_session_ended() {
-    VIEWERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let seconds = SESSION_START.lock().ok().and_then(|mut s| s.take()).map(|at| at.elapsed().as_secs()).unwrap_or(0);
     let now = epoch();
-    LAST_END.store(now, std::sync::atomic::Ordering::Relaxed);
     let line = serde_json::json!({ "at": now, "duration_s": seconds }).to_string();
     let mut lines: Vec<String> = std::fs::read_to_string(HISTORY_JSONL).unwrap_or_default()
         .lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
     lines.push(line);
     if lines.len() > HISTORY_KEEP { lines.drain(..lines.len() - HISTORY_KEEP); }
     let _ = std::fs::write(HISTORY_JSONL, lines.join("\n") + "\n");
-    write_status();
+    write_status(crate::ios_status::Event::Ended);
 }
 
 /// Keeps the status file fresh so the panel can tell a running host from a stopped one.
 pub fn start_status_writer() {
     std::thread::Builder::new().name("uu-ios-status".into()).spawn(|| loop {
-        write_status();
+        write_status(crate::ios_status::Event::Heartbeat);
         std::thread::sleep(Duration::from_secs(3));
     }).ok();
 }

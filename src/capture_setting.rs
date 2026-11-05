@@ -283,6 +283,8 @@ pub fn sync_payload(settings: &VideoSettings, native: (u32, u32)) -> Vec<u8> {
     put_varint(6, u64::from(size.1), &mut out);
     put_varint(9, u64::from(size.0), &mut out);
     put_varint(10, u64::from(size.1), &mut out);
+    // Field 11 screen_orientation (official Mac UURemote descriptor): SO_LANDSCAPE=1, SO_PORTRAIT=2.
+    put_varint(11, if size.1 > size.0 { 2 } else { 1 }, &mut out);
     out
 }
 
@@ -553,6 +555,10 @@ mod tests {
         assert_eq!(number(&fields, 2), Some(QUALITY_AUTO));
         assert_eq!(number(&fields, 5), Some(1920));
         assert_eq!(number(&fields, 10), Some(1080));
+        assert_eq!(number(&fields, 11), Some(1));
+        let portrait = decode_wire(&sync_payload(&VideoSettings::default(), (2048, 2732))).unwrap().iter()
+            .find(|f| f.number == 11).map(|f| matches!(f.value, crate::protocol::WireValue::Varint(2)));
+        assert_eq!(portrait, Some(true));
     }
 }
 

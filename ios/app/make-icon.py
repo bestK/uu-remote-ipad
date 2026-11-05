@@ -7,8 +7,9 @@ No NetEase artwork is stored in this repository (AGENTS.md): the icon is derived
 import os, subprocess, sys, tempfile
 
 SOURCE = "/Applications/UURemote.app/Contents/Resources/AppIcon.icns"
-# (file name, edge in pixels) for CFBundleIcons~ipad; iOS masks the corners itself.
-OUTPUTS = [("AppIcon76x76@2x~ipad.png", 152), ("AppIcon83.5x83.5@2x~ipad.png", 167)]
+# (file name, edge in pixels) for CFBundleIcons and CFBundleIcons~ipad; iOS masks the corners itself.
+OUTPUTS = [("AppIcon60x60@2x.png", 120), ("AppIcon60x60@3x.png", 180),
+           ("AppIcon76x76@2x~ipad.png", 152), ("AppIcon83.5x83.5@2x~ipad.png", 167)]
 
 
 def largest_png(iconset):

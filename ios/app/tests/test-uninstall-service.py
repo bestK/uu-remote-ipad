@@ -77,8 +77,8 @@ esac
         path.write_text(source)
         path.chmod(0o755)
 
-    def run_script(self, **env):
-        return subprocess.run(["/bin/sh", str(self.script)], env={**self.env, **env},
+    def run_script(self, *args, **env):
+        return subprocess.run(["/bin/sh", str(self.script), *args], env={**self.env, **env},
                               capture_output=True, text=True, timeout=10)
 
     def assert_preserved(self):
@@ -142,6 +142,125 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("service uninstalled", result.stdout)
         self.assert_preserved()
+
+    def test_roothide_root_argument(self):
+        # The panel passes roothide's randomized root as $1; /var/jb does not exist there.
+        jb = self.path("/var/jb")
+        jbroot = self.path("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF")
+        jbroot.parent.mkdir(parents=True)
+        jb.rename(jbroot)
+        result = self.run_script(str(jbroot))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path in self.removed:
+            moved = jbroot / path[len("/var/jb/"):] if path.startswith("/var/jb/") else self.path(path)
+            self.assertFalse(moved.exists(), path)
+        self.assertEqual((jbroot / "usr/sbin/frida-server").read_text(), "synthetic fixture\n")
+        self.assertEqual((jbroot / "var/log/uuremote.log").read_text(), "synthetic fixture\n")
+
+
+class InstallServiceTests(unittest.TestCase):
+    """Run the real install script against a roothide-style root with fake ldid/launchctl/id."""
+
+    def test_roothide_install_rewrites_plists(self):
+        with tempfile.TemporaryDirectory(prefix="uu-install-check-") as temp:
+            temp = Path(temp)
+            service = temp / "service"
+            service.mkdir()
+            source = SOURCE.parent
+            for name in ("install-service.sh", "com.uuremote.host.plist", "com.uuremote.frida.plist", "entitlements.plist"):
+                (service / name).write_bytes((source / name).read_bytes())
+            for name in ("uuremote-server", "frida-server", "frida-agent.dylib"):
+                (service / name).write_text("synthetic binary\n")
+            jbroot = temp / "var/containers/Bundle/Application/.jbroot-0123456789ABCDEF"
+            bin_dir = jbroot / "usr/bin"
+            bin_dir.mkdir(parents=True)
+            for name, body in (("id", 'printf "0\\n"'), ("ldid", "exit 0"),
+                               ("launchctl", f'printf "%s\\n" "$*" >> "{temp}/calls"')):
+                (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+                (bin_dir / name).chmod(0o755)
+            result = subprocess.run(["/bin/sh", str(service / "install-service.sh"), str(jbroot)],
+                                    env={**os.environ, "PATH": "/usr/bin:/bin"},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("service installed", result.stdout)
+            self.assertTrue((jbroot / "usr/local/bin/uuremote-server").is_file())
+            self.assertTrue((jbroot / "usr/sbin/frida-server").is_file())
+            agent = jbroot / "usr/lib/frida-1.0/frida-agent.dylib"
+            self.assertEqual(agent.read_text(), "synthetic binary\n")
+            self.assertEqual(agent.stat().st_mode & 0o777, 0o755)
+            self.assertFalse(agent.with_suffix(".dylib.new").exists())
+            # Refuse an incomplete bundle before touching an existing installation.
+            (service / "frida-agent.dylib").unlink()
+            (service / "uuremote-server").write_text("should not install\n")
+            missing = subprocess.run(["/bin/sh", str(service / "install-service.sh"), str(jbroot)],
+                                     env={**os.environ, "PATH": "/usr/bin:/bin"},
+                                     capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing frida-agent.dylib", missing.stdout)
+            self.assertEqual((jbroot / "usr/local/bin/uuremote-server").read_text(), "synthetic binary\n")
+            self.assertEqual(agent.read_text(), "synthetic binary\n")
+            for job in ("com.uuremote.host", "com.uuremote.frida"):
+                plist = (jbroot / f"Library/LaunchDaemons/{job}.plist").read_text()
+                self.assertNotIn("/var/jb", plist)
+                self.assertIn(str(jbroot), plist)
+            self.assertIn(f"bootstrap system {jbroot}/Library/LaunchDaemons/com.uuremote.host.plist",
+                          (temp / "calls").read_text())
+
+
+class RestartServiceTests(unittest.TestCase):
+    """Run the real restart script against a roothide-style root with fake launchctl/id."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="uu-restart-check-")
+        self.addCleanup(temp.cleanup)
+        self.temp = Path(temp.name)
+        self.jbroot = self.temp / "var/containers/Bundle/Application/.jbroot-0123456789ABCDEF"
+        bin_dir = self.jbroot / "usr/bin"
+        bin_dir.mkdir(parents=True)
+        (self.jbroot / "Library/LaunchDaemons").mkdir(parents=True)
+        (self.jbroot / "var/log").mkdir(parents=True)
+        for job in ("com.uuremote.host", "com.uuremote.frida"):
+            (self.jbroot / f"Library/LaunchDaemons/{job}.plist").write_text("synthetic\n")
+        self.log = self.jbroot / "var/log/uuremote.log"
+        self.log.write_text("synthetic\n")
+        self.log.chmod(0o600)
+        self.calls = self.temp / "calls"
+        launchctl = f"""printf '%s\\n' "$*" >> "{self.calls}"
+case "$1" in
+    print) exit 0 ;;
+    kickstart) [ "$CHECK_NO_KICKSTART" != 1 ] ;;
+    bootout|bootstrap) exit 0 ;;
+    *) exit 1 ;;
+esac"""
+        for name, body in (("id", 'printf "0\\n"'), ("launchctl", launchctl)):
+            (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+            (bin_dir / name).chmod(0o755)
+
+    def run_script(self, **env):
+        return subprocess.run(["/bin/sh", str(SOURCE.parent / "restart-service.sh"), str(self.jbroot)],
+                              env={**os.environ, "PATH": "/usr/bin:/bin", **env},
+                              capture_output=True, text=True, timeout=10)
+
+    def test_restarts_frida_then_host_and_opens_logs(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("service restarted", result.stdout)
+        calls = self.calls.read_text()
+        self.assertLess(calls.index("kickstart -k system/com.uuremote.frida"),
+                        calls.index("kickstart -k system/com.uuremote.host"))
+        self.assertEqual(self.log.stat().st_mode & 0o777, 0o644)
+
+    def test_without_kickstart_reloads(self):
+        result = self.run_script(CHECK_NO_KICKSTART="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"bootstrap system {self.jbroot}/Library/LaunchDaemons/com.uuremote.host.plist",
+                      self.calls.read_text())
+
+    def test_not_installed_fails(self):
+        (self.jbroot / "Library/LaunchDaemons/com.uuremote.host.plist").unlink()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not installed: com.uuremote.host", result.stdout)
 
 
 if __name__ == "__main__":

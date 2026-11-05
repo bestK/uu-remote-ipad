@@ -31,23 +31,34 @@ source, count = re.subn(
     source,
 )
 assert count == 9, "路径常量数量变化，请先审查隔离范围"
+rootfs = 'static NSString *const kRootfsPrefix = @"/rootfs";'
+assert source.count(rootfs) == 1, "rootfs 备选路径变化，请先审查隔离范围"
+source = source.replace(rootfs, f'static NSString *const kRootfsPrefix = @"{fixtures / "rootfs"}";')
 # 语言固定只存在于测试副本，发布代码仍跟随系统语言。
 source = source.replace('[[NSLocale preferredLanguages].firstObject hasPrefix:@"zh"]',
                         "YES" if args.language == "zh" else "NO")
+# 日志页只读隔离目录下的合成日志，不访问真实越狱根目录。
+marker = "static NSString *JailbreakRoot(void) {"
+assert source.count(marker) == 1, "越狱根目录查找函数变化，请先审查隔离范围"
+source = source.replace(marker, f'static NSString *JailbreakRoot(void) {{ return @"{fixtures / "jbroot"}"; }}\n'
+                        "static __attribute__((unused)) NSString *ShippingJailbreakRoot(void) {")
 # 所有提权操作在测试副本中替换为可控结果；原始进程运行器仍由下面的 iOS 编译检查覆盖。
 start = source.index("static NSString *RunServiceScript(")
 end = source.index("typedef NS_ENUM(NSInteger, HostState)", start)
 source = source[:start] + '''static BOOL fixtureServiceOK = YES, fixtureServiceTimeout = NO;
 static NSString *fixtureServiceScript;
+static NSString *fixtureServiceArgument;
+static NSString *fixtureServiceOutput;
 static BOOL fixtureDefaultPassword;
 static NSUInteger fixtureServiceCalls;
-static NSString *RunServiceScript(NSString *scriptName, NSString *password, BOOL *success, BOOL *timedOut) {
+static NSString *RunServiceScript(NSString *scriptName, NSString *argument, NSString *password, BOOL *success, BOOL *timedOut) {
     fixtureServiceCalls++;
     fixtureServiceScript = scriptName;
+    fixtureServiceArgument = argument;
     fixtureDefaultPassword = [password isEqualToString:@"123"];
     *success = fixtureServiceOK;
     *timedOut = fixtureServiceTimeout;
-    return @"synthetic service result";
+    return fixtureServiceOutput ?: @"synthetic service result";
 }
 
 ''' + source[end:]

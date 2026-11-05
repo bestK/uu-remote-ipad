@@ -37,6 +37,13 @@ static void on_message(FridaScript *script, const gchar *message, GBytes *data, 
     if (self->cb) self->cb(message, bytes, len, self->user);
 }
 
+// Only stage and numeric error code: Frida error messages may contain paths or other private data.
+static void log_failure(const char *stage, GError *error) {
+    fprintf(stderr, "[frida] initialization failed: stage=%s error_present=%d error_code=%d\n",
+            stage, error != NULL, error ? error->code : 0);
+    if (error) g_error_free(error);
+}
+
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static void do_frida_init(void) { frida_init(); }
 
@@ -48,9 +55,9 @@ static gpointer loop_thread(gpointer arg) {
     GError *error = NULL;
     self->manager = frida_device_manager_new();
     self->device = frida_device_manager_add_remote_device_sync(self->manager, self->address, NULL, NULL, &error);
-    if (!self->device) { self->failed = 1; goto done; }
+    if (!self->device) { log_failure("connect", error); self->failed = 1; goto done; }
     FridaProcessList *procs = frida_device_enumerate_processes_sync(self->device, FRIDA_SCOPE_MINIMAL, NULL, &error);
-    if (!procs) { self->failed = 1; goto done; }
+    if (!procs) { log_failure("enumerate", error); self->failed = 1; goto done; }
     guint pid = 0;
     for (gint i = 0; i < frida_process_list_size(procs); i++) {
         FridaProcess *p = frida_process_list_get(procs, i);
@@ -58,18 +65,18 @@ static gpointer loop_thread(gpointer arg) {
         g_object_unref(p);
     }
     g_object_unref(procs);
-    if (!pid) { self->failed = 1; goto done; }
+    if (!pid) { log_failure("process-not-found", NULL); self->failed = 1; goto done; }
     self->session = frida_device_attach_sync(self->device, pid, NULL, NULL, &error);
-    if (!self->session) { self->failed = 1; goto done; }
+    if (!self->session) { log_failure("attach", error); self->failed = 1; goto done; }
     FridaScriptOptions *opts = frida_script_options_new();
     frida_script_options_set_name(opts, "uu-ipad");
     frida_script_options_set_runtime(opts, FRIDA_SCRIPT_RUNTIME_QJS);
     self->script = frida_session_create_script_sync(self->session, self->source, opts, NULL, &error);
     g_object_unref(opts);
-    if (!self->script) { self->failed = 1; goto done; }
+    if (!self->script) { log_failure("create-script", error); self->failed = 1; goto done; }
     g_signal_connect(self->script, "message", G_CALLBACK(on_message), self);
     frida_script_load_sync(self->script, NULL, &error);
-    if (error) { g_error_free(error); self->failed = 1; goto done; }
+    if (error) { log_failure("load-script", error); self->failed = 1; goto done; }
     self->loop = g_main_loop_new(ctx, FALSE);
     pthread_mutex_lock(&self->mutex);
     self->ready = 1;

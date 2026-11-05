@@ -23,6 +23,7 @@
   </dict>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>Umask</key><integer>18</integer>
   <key>StandardOutPath</key><string>/var/jb/var/log/uuremote.log</string>
   <key>StandardErrorPath</key><string>/var/jb/var/log/uuremote.log</string>
 </dict>
