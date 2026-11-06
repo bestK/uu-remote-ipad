@@ -119,14 +119,19 @@ cat > "$OUT/index.html" <<HTML
  h1{font-size:24px;margin:0 0 8px}
  p{color:#a8adb5;margin:0 0 16px}
  code{display:block;padding:14px 16px;background:#16181c;border-radius:12px;color:#7ee0c0;word-break:break-all}
+ a{color:#7ee0c0;overflow-wrap:anywhere}
+ .qr{display:block;width:222px;max-width:100%;height:auto;margin:16px 0}
  .note{font-size:13px;color:#6f757e;margin-top:28px}
 </style>
 <main>
  <h1>UU 远程 iPad 源</h1>
  <p>在 Sileo 或 Zebra 里添加下面的源地址：</p>
  <code>https://bestk.github.io/uu-remote-ipad/</code>
- <p style="margin-top:24px">最新版本：<strong>$VERSION</strong></p>
- <p class="note">非官方项目，与网易无关。仅用于越狱设备。</p>
+ <p style="margin-top:24px">最新版本 / Latest version：<strong>$VERSION</strong></p>
+ <p>扫码打开本页面 / Scan to open this page</p>
+ <img class="qr" width="222" height="222" alt="本页面二维码 / QR code for this page" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAN4AAADeAQAAAAB6HIMaAAABR0lEQVR42u2Y0W3EMAxDhXoAj5TVPZIHEKCKpC/Xn/a3PCCGccjFP4TCPFGJ+n1lPIfPoe9hYF0xa/B6bPzv6/yKP9Z/HEJtC6t9De7S5k1TtTuoMzJacLTaLrW52lErdecT1ObkRS13tfRtztUik7V19q2YMPa9rZmgJQ/kjzu2vqXI1YK7yHKFbW37/QrIW3jRSIbh7dsmLf607IPcKF/f0gOzq3ps4MwEskvWhStSsm3VyqjoEXF4u51TzRJj27etE2+csdrz9AkEhkZkBlsndEnFW/VcAc2XCXzuVPhGrncvQ0J4A21fxrVlAIMfkBXVfJ0JpnamrUhW3hnszrpnlrTPt8V5BwY2ZoJmh7v5vvhgP5cJthHOTJBa1JZkCP6az7wgGHLCpaZmPvPi68c8w04a+/YwgUlMGayMU83z6fI5/LTDb+ADFoUT9xrHAAAAAElFTkSuQmCC">
+ <p>开源地址 / Source code：<a href="https://github.com/bestK/uu-remote-ipad">github.com/bestK/uu-remote-ipad</a></p>
+ <p class="note">非官方项目，与网易无关。仅用于越狱设备。<br>Unofficial project, not affiliated with NetEase. For jailbroken devices only.</p>
 </main>
 HTML
 

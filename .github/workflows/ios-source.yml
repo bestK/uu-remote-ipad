@@ -1,0 +1,48 @@
+name: Update iOS source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packaging/ios/**
+      - .github/workflows/ios-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ios-source
+  cancel-in-progress: false
+
+jobs:
+  repo:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # Reuse the published IPA when only the source page or packaging changes.
+      - name: Download latest iPad release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("ipad-v"))][0].tagName')
+          [[ "$tag" =~ ^ipad-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/ipa"
+          gh release download "$tag" --pattern "UURemotePanel-${tag}.ipa" --dir "$RUNNER_TEMP/ipa"
+          echo "SOURCE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Build APT repository
+        run: |
+          unzip -q "$RUNNER_TEMP/ipa/UURemotePanel-${SOURCE_TAG}.ipa" -d "$RUNNER_TEMP/ipa/x"
+          sh packaging/ios/build-repo.sh "$RUNNER_TEMP/ipa/x/Payload/UURemotePanel.app" "${SOURCE_TAG#ipad-v}" site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
