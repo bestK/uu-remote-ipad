@@ -2,8 +2,11 @@
 
 [简体中文](README.md) | **English**
 
-**Project homepage / package source**: [https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/).
-This URL can be added as a repository in Sileo or Zebra for installation; the panel IPA can also be installed via TrollStore or SideStore.
+| Entry | How to use |
+|---|---|
+| 🌐 **Project homepage** | [https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/) |
+| <img src="https://raw.githubusercontent.com/Sileo/Sileo/c9f70158a037dc76b91c450e72af2de0514dd3ee/Sileo/Assets.xcassets/AppIcon.appiconset/AppIcon60x60%402x.png" width="24" height="24" alt="Sileo"> **Sileo** / <img src="https://raw.githubusercontent.com/zbrateam/Zebra/62bc2b8ba33cd6045d3a007163bfdda63b201913/Zebra/Assets.xcassets/App%20Icons/AppIcon.appiconset/Icon-App-60x60%402x.png" width="24" height="24" alt="Zebra"> **Zebra** | Add the package source in your package manager: `https://bestk.github.io/uu-remote-ipad/` (rootless `iphoneos-arm64`). |
+| 📦 **IPA installation** | Install `UURemotePanel.ipa` with TrollStore or SideStore. |
 
 > **This repository is the iPad host.** The host runs on a jailbroken iPad itself, and the official NetEase
 > UU Remote (网易 UU 远程) clients (Windows / Mac / mobile) connect to it as usual to control the iPad.

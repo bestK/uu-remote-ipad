@@ -2,8 +2,11 @@
 
 **简体中文** | [English](README.en.md)
 
-**项目主页 / 安装源**：[https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/)。
-该地址可作为软件源添加至 Sileo 或 Zebra 进行安装；面板 IPA 也可以通过 TrollStore 或 SideStore 安装。
+| 入口 | 使用方式 |
+|---|---|
+| 🌐 **项目主页** | [https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/) |
+| <img src="https://raw.githubusercontent.com/Sileo/Sileo/c9f70158a037dc76b91c450e72af2de0514dd3ee/Sileo/Assets.xcassets/AppIcon.appiconset/AppIcon60x60%402x.png" width="24" height="24" alt="Sileo"> **Sileo** / <img src="https://raw.githubusercontent.com/zbrateam/Zebra/62bc2b8ba33cd6045d3a007163bfdda63b201913/Zebra/Assets.xcassets/App%20Icons/AppIcon.appiconset/Icon-App-60x60%402x.png" width="24" height="24" alt="Zebra"> **Zebra** | 在包管理器中添加软件源：`https://bestk.github.io/uu-remote-ipad/`（rootless `iphoneos-arm64`）。 |
+| 📦 **IPA 安装** | 使用 TrollStore 或 SideStore 安装 `UURemotePanel.ipa`。 |
 
 > **本仓库是 iPad 被控端。** 宿主直接跑在越狱 iPad 上，官方 UU 远程客户端（Windows / Mac / 手机）照常连接，
 > 就能远程操作 iPad。基于 [uu-remote-linux](https://github.com/bestK/uu-remote-linux) 移植，Linux 部分保留在本文后半。
