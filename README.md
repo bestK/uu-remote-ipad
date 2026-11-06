@@ -2,6 +2,9 @@
 
 **简体中文** | [English](README.en.md)
 
+**项目主页 / 安装源**：[https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/)。
+该地址可作为软件源添加至 Sileo 或 Zebra 进行安装；面板 IPA 也可以通过 TrollStore 或 SideStore 安装。
+
 > **本仓库是 iPad 被控端。** 宿主直接跑在越狱 iPad 上，官方 UU 远程客户端（Windows / Mac / 手机）照常连接，
 > 就能远程操作 iPad。基于 [uu-remote-linux](https://github.com/bestK/uu-remote-linux) 移植，Linux 部分保留在本文后半。
 >

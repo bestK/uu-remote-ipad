@@ -2,6 +2,9 @@
 
 [简体中文](README.md) | **English**
 
+**Project homepage / package source**: [https://bestk.github.io/uu-remote-ipad/](https://bestk.github.io/uu-remote-ipad/).
+This URL can be added as a repository in Sileo or Zebra for installation; the panel IPA can also be installed via TrollStore or SideStore.
+
 > **This repository is the iPad host.** The host runs on a jailbroken iPad itself, and the official NetEase
 > UU Remote (网易 UU 远程) clients (Windows / Mac / mobile) connect to it as usual to control the iPad.
 > Ported from [uu-remote-linux](https://github.com/bestK/uu-remote-linux); the Linux documentation follows below.
